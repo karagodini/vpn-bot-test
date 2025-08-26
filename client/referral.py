@@ -7,7 +7,6 @@ import aiosqlite
 import asyncio
 import random
 from log import logger
-from admin.admin import get_referral_stats
 from client.menu import get_back_button
 from handlers.states import PromoCodeState
 from buttons.client import BUTTON_TEXTS
@@ -72,20 +71,12 @@ async def referral_info(callback_query: types.CallbackQuery, bot, state: FSMCont
         expiry_time = 30 
         price, total_discount, referral_count = get_price_with_referral_info(expiry_time, telegram_id, user_promo_code)
 
-        # 🔽 Получаем статистику по рефералам
-        stats = await get_referral_stats(referral_code)
-
         # 🔽 Форматируем текст с полной статистикой
         formatted_ref_text = REF_TEXT.format(
             referral_link=referral_link,
             total_discount=total_discount,
             sum_my=sum_my,
-            sum_ref=sum_ref,
-            free_subs=stats["free_subs"],
-            paid_subs=stats["paid_subs"],
-            no_subs=stats["no_subs"],
-            total_clicks=stats["total_clicks"],
-            total_amount=stats["total_amount"]
+            sum_ref=sum_ref
         )
 
         referral_button = InlineKeyboardBuilder()

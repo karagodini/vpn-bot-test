@@ -6,6 +6,7 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiohttp import ClientSession, TCPConnector
 from aiogram import Router, F
+import aiosqlite
 from uuid import uuid4
 from aiogram.enums.parse_mode import ParseMode
 from bot import bot
@@ -1093,11 +1094,7 @@ async def test_chats(message: Message):
     except Exception as e:
         await message.answer(f"❌ Ошибка в REFERRAL_CHAT_ID: {e}")
 
-from aiogram import Router, types
-from aiogram.filters import Command
-import aiosqlite
 
-router = Router()
 
 # ID пользователя, по которому проверяем рефералов
 TARGET_USER_ID = 1311997119

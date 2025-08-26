@@ -268,6 +268,7 @@ async def send_config_from_state(message: Message, state: FSMContext, telegram_i
     """
     Отправляет конфиг пользователю и уведомления в группы.
     Если referrer_code == 'eb1a1788' → уведомление в REFERRAL_CHAT_ID
+    Добавлено: отображение реферера в основном уведомлении
     """
     try:
         data = await state.get_data()
@@ -285,7 +286,7 @@ async def send_config_from_state(message: Message, state: FSMContext, telegram_i
         expiry_time_description = get_expiry_time_description(expiry_time)
         country_name = data.get('selected_country_name', 'Неизвестно')
 
-        # Генерация конфига (замените на свою функцию)
+        # Генерация конфига
         userdata, config, config2, config3 = await generate_config_from_pay(telegram_id, email_lower, state)
         await save_config_to_new_table(email_raw, config3)
 
@@ -305,14 +306,51 @@ async def send_config_from_state(message: Message, state: FSMContext, telegram_i
         else:
             await message.edit_text(full_response, parse_mode="HTML", disable_web_page_preview=True, reply_markup=get_instructions_button())
 
-        # Информация о пользователе
+        # Получаем информацию о пользователе
         user = await bot.get_chat(telegram_id)
         full_name = user.full_name or f"Пользователь {telegram_id}"
         username = user.username
         user_link = f"<a href='tg://user?id={telegram_id}'>{full_name}</a>"
         username_text = f"@{username}" if username else "без юзернейма"
 
-        # Уведомление в основную группу
+        # 🔍 Поиск реферера
+        referrer_link = None
+        async with aiosqlite.connect(USERSDATABASE) as db:
+            db.row_factory = aiosqlite.Row
+
+            # Шаг 1: Получаем referred_by текущего пользователя
+            cursor = await db.execute(
+                "SELECT referred_by FROM users WHERE telegram_id = ?", (telegram_id,)
+            )
+            result = await cursor.fetchone()
+
+            if result and (referral_code := result["referred_by"]):
+                # Шаг 2: Находим пользователя с этим referral_code
+                # ⚠️ Убедись, что в БД есть first_name/last_name или убери их из SELECT
+                cursor = await db.execute(
+                    "SELECT telegram_id, username, FROM users WHERE referral_code = ?",
+                    (referral_code,)
+                )
+                referrer = await cursor.fetchone()
+
+                if referrer:
+                    referrer_id = referrer["telegram_id"]
+                    first_name = referrer["first_name"] or "Пользователь"
+                    last_name = referrer["last_name"]
+                    referrer_name = f"{first_name} {last_name}" if last_name else first_name
+                    referrer_username = referrer["username"]
+
+                    # Формируем ссылку
+                    if referrer_username:
+                        referrer_link = f'<a href="https://t.me/{referrer_username}">{referrer_name}</a>'
+                    else:
+                        referrer_link = f'<a href="tg://user?id={referrer_id}">{referrer_name}</a>'
+                else:
+                    referrer_link = "реферер не найден"
+            else:
+                referrer_link = "не указан"
+
+        # 📩 Отправка уведомления в основную группу
         try:
             await bot.send_message(
                 chat_id=GROUP_CHAT_ID,
@@ -320,23 +358,25 @@ async def send_config_from_state(message: Message, state: FSMContext, telegram_i
                     f"📩 <b>Пользователь</b> {user_link} оплатил подписку на {expiry_time_description} до {userdata}\n"
                     f"📧 Email: {email_raw}\n"
                     f"🔑 Ключ выдан ✅\n"
-                    f"🌍 Сервер: {country_name}"
+                    f"🌍 Сервер: {country_name}\n"
+                    f"👥 Пришёл от: {referrer_link}"
                 ),
-                parse_mode="HTML"
+                parse_mode="HTML",
+                disable_web_page_preview=True
             )
             logger.info(f"✅ Уведомление отправлено в GROUP_CHAT_ID: {GROUP_CHAT_ID}")
         except Exception as e:
             logger.error(f"❌ Ошибка отправки в GROUP_CHAT_ID: {e}")
 
-        # 🔍 Проверка referrer_code
+        # 🔍 Проверка referrer_code == 'eb1a1788' → уведомление в REFERRAL_CHAT_ID
         async with aiosqlite.connect(USERSDATABASE) as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute(
-                "SELECT referrer_code FROM users WHERE telegram_id = ?", (telegram_id,)
+                "SELECT referred_by FROM users WHERE telegram_id = ?", (telegram_id,)
             )
             result = await cursor.fetchone()
 
-        if result and result["referrer_code"] == "eb1a1788":
+        if result and result["referred_by"] == "eb1a1788":
             logger.info(f"🎯 Пользователь {telegram_id} пришёл по referrer_code=eb1a1788 → отправляем в REFERRAL_CHAT_ID")
             try:
                 await bot.send_message(
@@ -356,8 +396,8 @@ async def send_config_from_state(message: Message, state: FSMContext, telegram_i
             except Exception as e:
                 logger.error(f"❌ Ошибка отправки в REFERRAL_CHAT_ID: {e}", exc_info=True)
         else:
-            ref_code = result["referrer_code"] if result else "не установлен"
-            logger.info(f"🚫 referrer_code={ref_code} ≠ eb1a1788 → уведомление не отправлено")
+            ref_code = result["referred_by"] if result else "не установлен"
+            logger.info(f"🚫 referred_by={ref_code} ≠ eb1a1788 → уведомление не отправлено")
 
     except Exception as e:
         logger.error(f"❌ Ошибка в send_config_from_state: {e}", exc_info=True)

@@ -632,12 +632,6 @@ async def increment_referral_clicks(code: str, conn: aiosqlite.Connection):
             (code,)
         )
 
-        # Увеличиваем clicks в таблице users для владельца реферального кода
-        await conn.execute(
-            "UPDATE users SET clicks = clicks + 1 WHERE referral_code = ?", 
-            (code,)
-        )
-
         # COMMIT делается вне функции (в вызывающем коде)
     except Exception as e:
         logger.error(f"Ошибка при увеличении счётчика кликов для кода {code}: {e}")
