@@ -313,38 +313,37 @@ async def send_config_from_state(message: Message, state: FSMContext, telegram_i
         user_link = f"<a href='tg://user?id={telegram_id}'>{full_name}</a>"
         username_text = f"@{username}" if username else "без юзернейма"
 
-        # 🔍 Поиск реферера
+        # 🔍 Поиск реферера и формирование Telegram-ссылки
         referrer_link = None
         async with aiosqlite.connect(USERSDATABASE) as db:
             db.row_factory = aiosqlite.Row
 
-            # Шаг 1: Получаем referred_by текущего пользователя
+            # Шаг 1: Получаем referrer_code текущего пользователя
             cursor = await db.execute(
-                "SELECT referred_by FROM users WHERE telegram_id = ?", (telegram_id,)
+                "SELECT referrer_code FROM users WHERE telegram_id = ?", (telegram_id,)
             )
             result = await cursor.fetchone()
 
-            if result and (referral_code := result["referred_by"]):
-                # Шаг 2: Находим пользователя с этим referral_code
-                # ⚠️ Убедись, что в БД есть first_name/last_name или убери их из SELECT
+            if result and (referral_code := result["referrer_code"]):
+                # Шаг 2: Находим пользователя, чей referral_code = referrer_code
                 cursor = await db.execute(
-                    "SELECT telegram_id, username, FROM users WHERE referral_code = ?",
+                    "SELECT telegram_id, telegram_link FROM users WHERE referral_code = ?",
                     (referral_code,)
                 )
                 referrer = await cursor.fetchone()
 
                 if referrer:
                     referrer_id = referrer["telegram_id"]
-                    first_name = referrer["first_name"] or "Пользователь"
-                    last_name = referrer["last_name"]
-                    referrer_name = f"{first_name} {last_name}" if last_name else first_name
-                    referrer_username = referrer["username"]
+                    referrer_username = referrer["telegram_link"]
 
-                    # Формируем ссылку
                     if referrer_username:
-                        referrer_link = f'<a href="https://t.me/{referrer_username}">{referrer_name}</a>'
+                        # Приоритет: ссылка через @username
+                        telegram_link = f"{referrer_username}"
+                        referrer_link = f'<a href="{telegram_link}">{referrer_username}</a>'
                     else:
-                        referrer_link = f'<a href="tg://user?id={referrer_id}">{referrer_name}</a>'
+                        # Резерв: deep link по ID
+                        telegram_link = f"tg://user?id={referrer_id}"
+                        referrer_link = f'<a href="{telegram_link}">Пользователь {referrer_id}</a>'
                 else:
                     referrer_link = "реферер не найден"
             else:
