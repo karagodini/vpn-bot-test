@@ -1092,3 +1092,50 @@ async def test_chats(message: Message):
         await message.answer("✅ Сообщение в REFERRAL_CHAT_ID отправлено")
     except Exception as e:
         await message.answer(f"❌ Ошибка в REFERRAL_CHAT_ID: {e}")
+
+from aiogram import Router, types
+from aiogram.filters import Command
+import aiosqlite
+
+router = Router()
+
+# ID пользователя, по которому проверяем рефералов
+TARGET_USER_ID = 1311997119
+DB_PATH = "database.db"  # ← Укажи правильный путь к твоему .db файлу
+
+@router.message(Command("ref_freez"))
+async def cmd_ref_freez(message: types.Message):
+    # Проверяем, что команда вызвана в личных сообщениях (не в группе)
+    if message.chat.type != "private":
+        await message.answer("❗ Эта команда доступна только в личных сообщениях с ботом.")
+        return
+
+    
+
+    try:
+        # Подключаемся к базе данных
+        async with aiosqlite.connect(DB_PATH) as db:
+            # Запрос: количество рефералов
+            async with db.execute(
+                "SELECT COUNT(*) FROM users WHERE referred_by = ?", (TARGET_USER_ID,)
+            ) as cursor:
+                count_row = await cursor.fetchone()
+                count_referrals = count_row[0] if count_row else 0
+
+            # Запрос: сумма sum_my
+            async with db.execute(
+                "SELECT COALESCE(SUM(sum_my), 0) FROM users WHERE referred_by = ?", (TARGET_USER_ID,)
+            ) as cursor:
+                sum_row = await cursor.fetchone()
+                total_sum = sum_row[0] if sum_row else 0.0
+
+        # Формируем и отправляем ответ в личные сообщения
+        await message.answer(
+            f"🔐 <b>Реферальная статистика для ID {TARGET_USER_ID}:</b>\n\n"
+            f"👥 Всего рефералов: <b>{count_referrals}</b>\n"
+            f"💰 Сумма (sum_my): <b>{total_sum:.2f}</b>",
+            parse_mode="HTML"
+        )
+
+    except Exception as e:
+        await message.answer(f"❌ Ошибка при работе с базой данных:\n{e}")
