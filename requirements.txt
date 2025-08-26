@@ -1,0 +1,10 @@
+yookassa
+aiogram
+pillow
+apscheduler
+aiosqlite
+qrcode
+aiocryptopay
+colorlog
+python-dotenv
+yoomoney
