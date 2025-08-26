@@ -1101,7 +1101,7 @@ router = Router()
 
 # ID пользователя, по которому проверяем рефералов
 TARGET_USER_ID = 1311997119
-DB_PATH = "database.db"  # ← Укажи правильный путь к твоему .db файлу
+DB_PATH = "users.db"  # ← Укажи правильный путь к твоему .db файлу
 
 @router.message(Command("ref_freez"))
 async def cmd_ref_freez(message: types.Message):
@@ -1109,8 +1109,6 @@ async def cmd_ref_freez(message: types.Message):
     if message.chat.type != "private":
         await message.answer("❗ Эта команда доступна только в личных сообщениях с ботом.")
         return
-
-    
 
     try:
         # Подключаемся к базе данных
