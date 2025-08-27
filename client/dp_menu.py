@@ -110,10 +110,10 @@ async def handle_user_registration(
                     (referred_by_code, telegram_id)
                 )
             
-            await notify_admins(telegram_id, referral_code, username, telegram_link)
+            await notify_admins(telegram_id, referred_by_code, username, telegram_link)
 
-            # 🔔 Если пришёл от eb1a1788 — отправляем в дополнительный чат
-            if referred_by_code == "eb1a1788":
+            # 🔔 Если пришёл от gtpiHVFvkE — отправляем в дополнительный чат
+            if referred_by_code == "gtpiHVFvkE":
                 await notify_referral_chat(telegram_id, username, telegram_link)
 
         await conn.commit()

@@ -44,6 +44,21 @@ async def notify_admins(telegram_id: int, referral_code: str, username: str, tel
                     referrer_info = f'<a href="tg://user?id={ref_id}">Пользователь {ref_id}</a>'
             else:
                 referrer_info = "реферер не найден"
+            # 🔎 Если реферер не найден в таблице users, ищем в таблице referals по коду
+            if referrer_info == "реферер не найден" or referrer_info == "не указан":
+                try:
+                    cursor_ref = await db.execute(
+                        "SELECT name FROM referals WHERE code = ?", 
+                        (referral_code,)
+                    )
+                    ref_data = await cursor_ref.fetchone()
+                    if ref_data:
+                        referrer_name = ref_data["name"]
+                        referrer_info = f"<b>{referrer_name}</b>"
+                    # Если и там не найден — оставляем "реферер не найден"
+                except Exception as e:
+                    logger.warning(f"Ошибка при поиске в таблице referals: {e}")
+                    # Оставляем текущее значение referrer_info
 
         # Формируем сообщение
         message_text = (

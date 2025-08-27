@@ -347,7 +347,7 @@ async def send_config_from_state(message: Message, state: FSMContext, telegram_i
                 else:
                     referrer_link = "реферер не найден"
             else:
-                referrer_link = "не указан"
+                referrer_link = "-"
 
         # 📩 Отправка уведомления в основную группу
         try:
