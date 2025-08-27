@@ -15,19 +15,46 @@ async def notify_admins(telegram_id: int, referral_code: str, username: str, tel
     """
     Улучшенная функция уведомления админов с обработкой ошибок
     Продолжает выполнение даже при недоступности чата
+    Добавлено: отображение реферера (кто пригласил)
     """
     try:
-        # Формируем сообщение
+        # Формируем ссылку на нового пользователя
         user_mention = f"<a href='{telegram_link}'>{username or 'Пользователь'}</a>"
         
+        # 🔍 Поиск реферера: кто пригласил (у кого referral_code == referral_code)
+        referrer_info = "не указан"
+        async with aiosqlite.connect(USERSDATABASE) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                "SELECT telegram_id, username, telegram_link FROM users WHERE referral_code = ?",
+                (referral_code,)
+            )
+            referrer = await cursor.fetchone()
+
+            if referrer:
+                referrer_username = referrer["username"]
+                referrer_tg_link = referrer["telegram_link"]
+
+                if referrer_tg_link:
+                    referrer_info = f'<a href="{referrer_tg_link}">{referrer_username or "Пользователь"}</a>'
+                elif referrer_username:
+                    referrer_info = f'<a href="https://t.me/{referrer_username}">@{referrer_username}</a>'
+                else:
+                    ref_id = referrer["telegram_id"]
+                    referrer_info = f'<a href="tg://user?id={ref_id}">Пользователь {ref_id}</a>'
+            else:
+                referrer_info = "реферер не найден"
+
+        # Формируем сообщение
         message_text = (
             "✨ У вас новый пользователь! ✨\n"
             f"👤 Пользователь: {user_mention}\n"
             f"🆔 Telegram ID: <code>{telegram_id}</code>\n"
-            f"🏷 Реферальный код: <code>{referral_code}</code>"
+            f"🏷 Реферальный код: <code>{referral_code}</code>\n"
+            f"👥 Пришёл от: {referrer_info}"
         )
 
-        # Пытаемся отправить в группу (с обработкой ошибок)
+        # Отправляем в группу
         try:
             await bot.send_message(
                 chat_id=GROUP_CHAT_ID,
@@ -35,23 +62,22 @@ async def notify_admins(telegram_id: int, referral_code: str, username: str, tel
                 parse_mode="HTML",
                 disable_web_page_preview=True
             )
-            logger.info(f"Уведомление отправлено в группу {GROUP_CHAT_ID}")
+            logger.info(f"✅ Уведомление отправлено в группу {GROUP_CHAT_ID}")
         except Exception as group_error:
-            logger.error(f"Ошибка отправки в группу {GROUP_CHAT_ID}: {str(group_error)}")
-            
-            # Пытаемся отправить в fallback чат или логировать
+            logger.error(f"❌ Ошибка отправки в группу {GROUP_CHAT_ID}: {str(group_error)}")
+            # Попытка отправить ошибку обратно (опционально)
             try:
                 await bot.send_message(
-                    chat_id=telegram_id,  # Или другой резервный чат
-                    text=f"Не удалось отправить уведомление в группу: {str(group_error)}",
+                    chat_id=telegram_id,
+                    text=f"⚠️ Не удалось отправить уведомление в группу: {str(group_error)[:200]}...",
                     parse_mode="HTML"
                 )
             except:
-                logger.warning("Не удалось отправить сообщение об ошибке")
+                logger.warning("⚠️ Не удалось отправить сообщение об ошибке")
 
     except Exception as e:
-        logger.error(f"Критическая ошибка в notify_admins: {str(e)}")
-        # Продолжаем выполнение несмотря на ошибку
+        logger.error(f"❌ Критическая ошибка в notify_admins: {str(e)}")
+        # Функция продолжает работу, не прерывая основной поток
 
 
 REFERRAL_CHAT_ID = -1003045150256
