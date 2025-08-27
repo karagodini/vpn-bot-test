@@ -647,107 +647,97 @@ async def start_payment_status_check(callback_query: types.CallbackQuery, state:
 
 async def process_successful_payment(callback_query: types.CallbackQuery, state: FSMContext):
     """
-    Обрабатывает успешное завершение платежа, добавляя клиента, генерируя конфигурацию,
-    записывая информацию о платеже и обновляя таблицу referal_tables по сроку подписки.
+    Обрабатывает успешный платёж с защитой от ошибок и дублирования.
     """
+    telegram_id = callback_query.from_user.id
+    task_id = f"{telegram_id}_{data.get('payment_id')}"
+
+    if task_id in purchase_tasks:
+        logger.warning(f"Повторный вызов платежа {task_id}")
+        return
+    purchase_tasks[task_id] = True
+
     try:
         data = await state.get_data()
-        user_promo_code = data.get('user_promo_code')
         final_price = data.get("final_price")
         name = data['name']
-        expiry_days = data['expiry_time']  # количество дней подписки
+        expiry_days = data['expiry_time']
         current_time = datetime.utcnow()
         expiry_timestamp = current_time + timedelta(days=expiry_days)
         expiry_time = int(expiry_timestamp.timestamp() * 1000)
 
         selected_server = data['selected_server']
-        telegram_id = callback_query.from_user.id
         server_data = await get_server_data(selected_server)
         if not server_data:
+            await callback_query.answer("Ошибка: сервер не найден.")
             return
 
+        # === 1. Вход в 3x UI ===
         session_id = await login(server_data['login_url'], {
             "username": server_data['username'],
             "password": server_data['password']
         })
+        if not session_id:
+            raise Exception("Не удалось войти в 3x UI")
 
+        # === 2. Добавляем клиента ===
         await add_client(
             name, expiry_time, server_data['inbound_ids'], telegram_id,
             server_data['add_client_url'], server_data['login_url'],
             {"username": server_data['username'], "password": server_data['password']}
         )
 
+        # === 3. Генерируем конфиг и отправляем сразу ===
         await state.update_data(
             email=name,
             client_id=telegram_id,
-            login_data={"username": server_data['username'], "password": server_data['password']},
             server_ip=server_data['server_ip'],
             config_client_url=server_data['config_client_url'],
-            inbound_ids=server_data['inbound_ids'],
-            login_url=server_data['login_url'],
-            sub_url=server_data['sub_url'],
             json_sub=server_data['json_sub'],
-            user_promo_code=user_promo_code
+            sub_url=server_data['sub_url'],
+            login_data={"username": server_data['username'], "password": server_data['password']},
+            user_promo_code=data.get('user_promo_code')
         )
 
         userdata, config, config2, config3 = await generate_config_from_pay(telegram_id, name, state)
-
-        # Рассчитываем примерное количество месяцев
         approx_months = round(expiry_days / 30)
+        tickets_msg = {1: "1 билет", 3: "3 билета", 12: "12 билетов"}.get(approx_months)
 
-        # Формируем сообщение с количеством билетов
-        if approx_months == 1:
-            tickets_msg = "1 билет"
-        elif approx_months == 3:
-            tickets_msg = "3 билета"
-        elif approx_months >= 12:
-            tickets_msg = "12 билетов"
-        else:
-            tickets_msg = None  # или любое другое сообщение
+        await send_config_from_state(callback_query.message, state, telegram_id, edit=False, tickets_message=tickets_msg)
 
-        # Отправляем конфигурацию вместе с сообщением о билетах
-        await send_config_from_state(callback_query.message, state, telegram_id=telegram_id, edit=False, tickets_message=tickets_msg)
-
+        # === 4. Обновляем БД ===
         await handle_database_operations(telegram_id, name, expiry_time)
         await insert_or_update_user(telegram_id, name, selected_server)
-        await log_promo_code_usage(telegram_id, user_promo_code)
+        await log_promo_code_usage(telegram_id, data.get('user_promo_code'))
         await update_sum_my(telegram_id, final_price)
         await update_sum_ref(telegram_id, final_price)
 
-        if approx_months == 1:
-            insert_count = 1
-        elif approx_months == 3:
-            insert_count = 3
-        elif approx_months >= 12:
-            insert_count = 12
-        else:
-            insert_count = 0
-
-        user = callback_query.from_user
-
-        if user.username:
-            telegram_ref = f"https://t.me/{user.username}"
-        else:
-            telegram_ref = user.first_name or "Неизвестный"
-
+        # === 5. Награда за оплату (билеты) ===
+        insert_count = {1: 1, 3: 3, 12: 12}.get(approx_months, 0)
         if insert_count > 0:
+            user = callback_query.from_user
+            telegram_ref = f"https://t.me/{user.username}" if user.username else user.first_name
             async with aiosqlite.connect("users.db") as conn:
+                await conn.execute('PRAGMA busy_timeout = 5000')  # Защита от блокировок
                 await conn.executemany(
                     "INSERT INTO referal_tables (telegram_user) VALUES (?)",
                     [(telegram_ref,)] * insert_count
                 )
                 await conn.commit()
 
+        # === 6. Добавляем бесплатные дни (например, +3 за первую оплату) ===
         await add_free_days(telegram_id, FREE_DAYS)
-
-        task_id = f"{telegram_id}_{data.get('payment_id')}"
-        purchase_tasks.pop(task_id, None)
 
         await state.clear()
 
     except Exception as e:
-        logger.error(f"Ошибка при обработке платежа: {e}")
-        return
+        logger.error(f"Ошибка при обработке платежа для {telegram_id}: {e}", exc_info=True)
+        try:
+            await callback_query.message.answer("Произошла ошибка. Напишите в поддержку.")
+        except:
+            pass
+    finally:
+        purchase_tasks.pop(task_id, None)
 
 
 async def handle_payment_check(callback_query: types.CallbackQuery, payment_id: str, payment_method: str):
