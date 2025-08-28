@@ -44,18 +44,38 @@ def create_yoomoney_invoice(amount: float, receiver: str, label: str, targets: s
     """
     Создает платежную ссылку в YooMoney.
     """
+    logger.info(
+        f"💳 Начато создание счёта в YooMoney:\n"
+        f"   → Сумма: {amount} RUB\n"
+        f"   → Получатель: {receiver}\n"
+        f"   → Метка (label): {label}\n"
+        f"   → Назначение: {targets}"
+    )
+
     try:
         quickpay = Quickpay(
             receiver=receiver,
             quickpay_form="shop",
             targets=targets,
-            paymentType="SB",
+            paymentType="SB",  # Можно сделать параметром при необходимости
             sum=amount,
             label=label
         )
+
+        logger.info(
+            f"✅ Счёт в YooMoney успешно создан:\n"
+            f"   → Ссылка: {quickpay.base_url}\n"
+            f"   → Метка: {quickpay.label}"
+        )
         return quickpay.base_url, quickpay.label
+
     except Exception as e:
-        logger.info(f"Ошибка при создании счета YooMoney: {e}")
+        logger.error(
+            f"❌ Ошибка при создании счёта YooMoney:\n"
+            f"   → Метка: {label}\n"
+            f"   → Исключение: {e}",
+            exc_info=True
+        )
         return None, None
 
 
@@ -63,19 +83,38 @@ async def check_yoomoney_payment_status(payment_id):
     """
     Проверяет статус платежа по метке (label) в YooMoney.
     """
+    logger.info(f"🔍 Начата проверка статуса платежа в YooMoney: label={payment_id}")
+
     try:
         client = Client(YOMOONEY)
+        logger.debug(f"Инициализирован клиент YooMoney для проверки платежа: {payment_id}")
+
         history = client.operation_history(label=payment_id)
-        logger.info(f"Проверка платежа: {payment_id}")
+        logger.info(f"Получена история операций для метки: {payment_id}. Найдено операций: {len(history.operations)}")
+
         for operation in history.operations:
-            logger.info(f"Найден платеж: {operation.operation_id}, статус: {operation.status}")
+            logger.info(
+                f"📊 Обнаружена операция:\n"
+                f"   → ID: {operation.operation_id}\n"
+                f"   → Статус: {operation.status}\n"
+                f"   → Сумма: {operation.amount}\n"
+                f"   → Дата: {operation.datetime}\n"
+                f"   → Метка: {operation.label}"
+            )
 
             if operation.label == payment_id and operation.status == "success":
+                logger.info(f"✅ Платёж по метке {payment_id} подтверждён (статус: success)")
                 return True
 
+        logger.info(f"⏳ Платёж с меткой {payment_id} не найден или ещё не завершён.")
         return False
+
     except Exception as e:
-        logger.info(f"Ошибка при проверке платежа YooMoney: {e}")
+        logger.error(
+            f"💥 Критическая ошибка при проверке статуса платежа YooMoney (label={payment_id}):\n"
+            f"   → Ошибка: {e}",
+            exc_info=True
+        )
         return False
 
 
@@ -123,105 +162,211 @@ def create_payment_yookassa(amount, chat_id, name, expiry_time, email):
     """
     Создает платеж через YooKassa.
     """
-    id_key = str(uuid.uuid4())
-    expiry_time_text = get_expiry_time_description(expiry_time)
-    description = f"Оплата подписки, логин: {name} на {expiry_time_text}"
+    logger.info(
+        f"💳 Начато создание платежа через YooKassa:\n"
+        f"   → Сумма: {amount} RUB\n"
+        f"   → Пользователь (chat_id): {chat_id}\n"
+        f"   → Логин: {name}\n"
+        f"   → Срок подписки: {expiry_time} дней\n"
+        f"   → Email: {email}"
+    )
 
-    payment = Payment.create({
-        "amount": {
-            'value': amount,
-            'currency': "RUB"
-        },
-        "receipt": {
-            "customer": {
-                "email": email
+    try:
+        # Генерация уникального ID платежа
+        id_key = str(uuid.uuid4())
+        logger.debug(f"Сгенерирован уникальный ID платежа: {id_key}")
+
+        # Формируем описание подписки
+        expiry_time_text = get_expiry_time_description(expiry_time)
+        description = f"Оплата подписки, логин: {name} на {expiry_time_text}"
+        logger.info(f"Описание платежа: {description}")
+
+        # Подготовка данных для платежа
+        payment_data = {
+            "amount": {
+                "value": str(float(amount)),
+                "currency": "RUB"
             },
-            "items": [
-                {
-                    "description": description,
-                    "quantity": 1.000,
-                    "amount": {
-                        "value": amount,
-                        "currency": "RUB"
-                    },
-                    "vat_code": 1,
-                    "payment_mode": "full_prepayment",
-                    "payment_subject": "commodity"
-                }
-            ]
-        },
-        'confirmation': {
-            'type': 'redirect',
-            'return_url': BOT_LINK
-        },
-        'capture': True,
-        'metadata': {
-            'chat_id': chat_id,
-            'name': name,
-            'expiry_time': expiry_time
-        },
-        'description': description
-    }, id_key)
+            "receipt": {
+                "customer": {
+                    "email": email
+                },
+                "items": [
+                    {
+                        "description": description,
+                        "quantity": 1.000,
+                        "amount": {
+                            "value": str(float(amount)),
+                            "currency": "RUB"
+                        },
+                        "vat_code": 1,
+                        "payment_mode": "full_prepayment",
+                        "payment_subject": "commodity"
+                    }
+                ]
+            },
+            "confirmation": {
+                "type": "redirect",
+                "return_url": BOT_LINK
+            },
+            "capture": True,
+            "metadata": {
+                "chat_id": chat_id,
+                "name": name,
+                "expiry_time": expiry_time
+            },
+            "description": description
+        }
 
-    return payment.confirmation.confirmation_url, payment.id
+        logger.debug("Данные платежа сформированы. Отправка запроса в YooKassa...")
+
+        # Создание платежа
+        payment = Payment.create(payment_data, id_key)
+
+        confirmation_url = payment.confirmation.confirmation_url
+        payment_id = payment.id
+
+        logger.info(
+            f"✅ Платёж успешно создан в YooKassa:\n"
+            f"   → ID платежа: {payment_id}\n"
+            f"   → Ссылка для оплаты: {confirmation_url}\n"
+            f"   → Метод подтверждения: redirect"
+        )
+
+        return confirmation_url, payment_id
+
+    except Exception as e:
+        logger.error(
+            f"❌ Ошибка при создании платежа в YooKassa:\n"
+            f"   → Пользователь: {chat_id}\n"
+            f"   → Сумма: {amount}\n"
+            f"   → Исключение: {e}",
+            exc_info=True  # Полная трассировка стека
+        )
+        return None, None
 
 async def check_payment_yookassa(payment_id):
     """
     Проверяет статус платежа в YooKassa.
     """
-    loop = asyncio.get_event_loop()
-    payment = await loop.run_in_executor(None, yookassa.Payment.find_one, payment_id)
-    
-    if payment.status == 'succeeded':
-        return payment.metadata
-    else:
+    logger.info(f"🔍 Начата проверка статуса платежа в YooKassa: payment_id={payment_id}")
+
+    try:
+        loop = asyncio.get_event_loop()
+        logger.debug(f"Запуск синхронного запроса к YooKassa (Payment.find_one) для payment_id={payment_id}")
+        
+        payment = await loop.run_in_executor(None, yookassa.Payment.find_one, payment_id)
+
+        if not payment:
+            logger.warning(f"❌ Платёж с ID {payment_id} не найден в YooKassa.")
+            return False
+
+        logger.info(f"📊 Получен статус платежа {payment_id}: {payment.status}")
+
+        if payment.status == 'succeeded':
+            metadata = dict(payment.metadata)
+            logger.info(
+                f"✅ Платёж {payment_id} успешно завершён.\n"
+                f"   → Метаданные: {metadata}"
+            )
+            return metadata
+        elif payment.status == 'pending':
+            logger.info(f"⏳ Платёж {payment_id} ещё в статусе 'pending'.")
+            return False
+        elif payment.status in ('canceled', 'expired'):
+            logger.warning(f"🚫 Платёж {payment_id} отменён или просрочен (статус: {payment.status})")
+            return False
+        else:
+            logger.warning(f"⚠️ Неизвестный статус платежа {payment_id}: {payment.status}")
+            return False
+
+    except Exception as e:
+        logger.error(
+            f"💥 Ошибка при проверке платежа {payment_id} в YooKassa:\n"
+            f"   → Исключение: {e}",
+            exc_info=True
+        )
         return False
 
 def create_paymentupdate(amount, chat_id, email):
     """
     Создает платеж для продления подписки через YooKassa.
     """
-    id_key = str(uuid.uuid4())
-    description = "Продление подписки"
+    logger.info(
+        f"💳 Начато создание платежа за продление подписки:\n"
+        f"   → Сумма: {amount} RUB\n"
+        f"   → Пользователь (chat_id): {chat_id}\n"
+        f"   → Email: {email}"
+    )
 
-    payment_data = {
-        "amount": {
-            'value': amount,
-            'currency': "RUB"
-        },
-        "receipt": {
-            "customer": {
-                "email": email
+    try:
+        # Генерация уникального ID платежа
+        id_key = str(uuid.uuid4())
+        description = "Продление подписки"
+        logger.debug(f"Сгенерирован payment_id: {id_key}")
+
+        # Подготовка данных платежа
+        payment_data = {
+            "amount": {
+                "value": str(float(amount)),
+                "currency": "RUB"
             },
-            "items": [
-                {
-                    "description": description,
-                    "quantity": 1.000,
-                    "amount": {
-                        "value": amount,
-                        "currency": "RUB"
-                    },
-                    "vat_code": 1,
-                    "payment_mode": "full_prepayment",
-                    "payment_subject": "commodity"
-                }
-            ]
-        },
-        'confirmation': {
-            'type': 'redirect',
-            'return_url': BOT_LINK
-        },
-        'capture': True,
-        'metadata': {
-            'chat_id': chat_id,
-            'name': description,
-        },
-        'description': description
-    }
+            "receipt": {
+                "customer": {
+                    "email": email
+                },
+                "items": [
+                    {
+                        "description": description,
+                        "quantity": 1.000,
+                        "amount": {
+                            "value": str(float(amount)),
+                            "currency": "RUB"
+                        },
+                        "vat_code": 1,
+                        "payment_mode": "full_prepayment",
+                        "payment_subject": "commodity"
+                    }
+                ]
+            },
+            "confirmation": {
+                "type": "redirect",
+                "return_url": BOT_LINK
+            },
+            "capture": True,
+            "metadata": {
+                "chat_id": chat_id,
+                "name": description,
+            },
+            "description": description
+        }
 
-    payment = Payment.create(payment_data, id_key)
+        logger.debug("Данные платежа подготовлены. Отправка запроса в YooKassa...")
 
-    return payment.confirmation.confirmation_url, payment.id
+        # Создание платежа
+        payment = Payment.create(payment_data, id_key)
+
+        confirmation_url = payment.confirmation.confirmation_url
+        payment_id = payment.id
+
+        logger.info(
+            f"✅ Платёж за продление успешно создан:\n"
+            f"   → ID платежа: {payment_id}\n"
+            f"   → Ссылка для оплаты: {confirmation_url}\n"
+            f"   → Метод: redirect → {BOT_LINK}"
+        )
+
+        return confirmation_url, payment_id
+
+    except Exception as e:
+        logger.error(
+            f"❌ Ошибка при создании платежа за продление через YooKassa:\n"
+            f"   → Пользователь: {chat_id}\n"
+            f"   → Сумма: {amount}\n"
+            f"   → Исключение: {e}",
+            exc_info=True
+        )
+        return None, None
 
 #Робокасса
 def calculate_signature(merchant_login, amount, invoice_id, password1, receipt_json, shp_params=None):
