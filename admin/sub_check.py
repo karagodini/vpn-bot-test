@@ -95,8 +95,10 @@ async def process_inbound_clients(inbound_id, server_data, headers, current_date
 
 async def check_client_subscription(client, current_date):
     """
-    Проверяет подписку клиента и отправляет уведомления о сроке действия подписки.
-    Учитываются условия бесплатной подписки и наличие оплаты.
+    Проверяет подписку клиента и отправляет уведомления:
+    - за 3, 2, 1 день до окончания
+    - в день окончания
+    - через 3 и 7 дней после окончания (с кнопкой бесплатного теста)
     """
     expiry_time = client.get('expiryTime')
     email = client.get('email')
@@ -106,50 +108,60 @@ async def check_client_subscription(client, current_date):
         logger.warning(f"Telegram ID не найден для клиента {email}")
         return
 
-    # Получаем has_trial и sum_my из базы данных
     async with aiosqlite.connect("users.db") as conn:
         async with conn.execute(
-            "SELECT has_trial, sum_my FROM users WHERE telegram_id = ?",
+            "SELECT has_trial, sum_my, notified_after_3_days, notified_after_7_days FROM users WHERE telegram_id = ?",
             (telegram_id,)
         ) as cursor:
             result = await cursor.fetchone()
             if result is None:
                 logger.warning(f"Пользователь с Telegram ID {telegram_id} не найден в базе.")
                 return
-            has_trial, sum_my = result
+            has_trial, sum_my, notified_3d, notified_7d = result
 
-    # Логика отправки уведомлений
-    if sum_my == 0:
-        logger.info(f"Пропускаем уведомление для {email}: пользователь ещё не платил")
+    if expiry_time is None or expiry_time < 0:
+        logger.info(f"Пропускаем клиента {email}, срок подписки истек или не задан.")
         return
 
-    if expiry_time is not None:
-        expiry_date = datetime.fromtimestamp(expiry_time / 1000).date()
+    expiry_date = datetime.fromtimestamp(expiry_time / 1000).date()
+    logger.info(f"Дата окончания подписки для {email}: {expiry_date}")
 
-        if expiry_time < 0:
-            logger.info(f"Пропускаем клиента {email}, срок подписки истек.")
-            return
-
-        logger.info(f"Дата окончания подписки для {email}: {expiry_date}")
-
-        if current_date >= expiry_date:
+    # === 1. Уведомления ДО окончания (за 3, 2, 1 день) ===
+    for days_left in [3, 2, 1]:
+        if current_date + td(days=days_left) == expiry_date:
             await send_subscription_notification(
                 telegram_id,
-               f"Хэй, на связи MoyVPN!\n\nТвоя подписка, c логином {email}, закончилась.\n\n Но, мы видели, ты уже оценил наш щит от слежки и блокировок.\n\nНе тормози — за 80 рублей в месяц ты получаешь:\n— неограниченный доступ к любой информации и сайтам\n— защиту трафика, даже в открытом Wi-Fi\n— скорость, которую не режут\n\nЭто как кофе на вынос — только для твоей безопасности и удобства!",
-                InlineKeyboardButton(text=BUTTON_TEXTS["extend_subscription_subscr"], callback_data="extend_subscription")
+                f"Хай! Это не СПАМ-сообщение ‼️\n\n⏳ До окончания вашей подписки {email} осталось {days_left} {get_days_word(days_left)}!\n\nЧтобы не остаться без любимых сайтов и приложений — продлите подписку заранее!",
+                InlineKeyboardButton(text=BUTTON_TEXTS["extend_subscription"], callback_data="extend_subscription")
             )
-        else:
-            for days_left in [3, 2, 1]:
-                if current_date + td(days=days_left) == expiry_date:
-                    notification_text = (
-                        #f"Приветствую ❗️\nДо окончания подписки, c логином:{email}, {days_left} {get_days_word(days_left)} ⏳"
-			f"Хай! Это не СПАМ-сообщение ‼️\n\n⏳ До окончания вашей подписки {email} осталось {days_left} {get_days_word(days_left)}!\n\nЧтобы не остаться без любимых сайтов и приложений — продлите подписку заранее!\n\nВсего 80 рублей за месяц — надёжный VPN всегда под рукой.\n\nПродлите свою подписку заранее и пользуйтесь без перебоев!"
-                    )
-                    await send_subscription_notification(
-                        telegram_id,
-                        notification_text,
-                        InlineKeyboardButton(text=BUTTON_TEXTS["extend_subscription"], callback_data="extend_subscription")
-                    )
+
+    # === 2. В день окончания ===
+    if current_date == expiry_date:
+        await send_subscription_notification(
+            telegram_id,
+            f"Хэй, на связи MoyVPN!\n\nТвоя подписка, c логином {email}, закончилась.\n\nНо ты уже оценил наш щит от слежки и блокировок.\n\nПродли за 80 руб/мес — получи защиту, скорость и свободу!",
+            InlineKeyboardButton(text=BUTTON_TEXTS["extend_subscription_subscr"], callback_data="extend_subscription")
+        )
+
+    # === 3. Через 3 дня после окончания ===
+    if current_date == expiry_date + td(days=3) and not notified_3d:
+        await send_subscription_notification(
+            telegram_id,
+            f"Мы скучаем! 🫂\n\nТы пропустил MoyVPN уже 3 дня.\n\nВозьми 3 дня бесплатно — попробуй снова!",
+            InlineKeyboardButton(text="Получить 3 дня бесплатно", callback_data="free_trial_3days")
+        )
+        await conn.execute("UPDATE users SET notified_after_3_days = 1 WHERE telegram_id = ?", (telegram_id,))
+        await conn.commit()
+
+    # === 4. Через 7 дней после окончания ===
+    if current_date == expiry_date + td(days=7) and not notified_7d:
+        await send_subscription_notification(
+            telegram_id,
+            f"Финальный шанс! 🔥\n\nТы давно не заходил.\n\nПопробуй ещё 3 дня бесплатно — вдруг снова понравится?",
+            InlineKeyboardButton(text="Попробовать бесплатно", callback_data="free_trial_3days")
+        )
+        await conn.execute("UPDATE users SET notified_after_7_days = 1 WHERE telegram_id = ?", (telegram_id,))
+        await conn.commit()
 
 
 async def send_subscription_notification(telegram_id, notification_text, button=None):
