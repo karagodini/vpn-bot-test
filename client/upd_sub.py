@@ -1,5 +1,6 @@
 import asyncio, json, requests, time, uuid
 from datetime import datetime as dt
+from datetime import datetime
 from aiogram import types
 from aiogram.fsm.context import FSMContext
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
@@ -277,59 +278,63 @@ async def from_upd_sub(email: str):
     return "\n\n".join(filter(None, responses)) if responses else f"❌ Прошлая конфигурация уже недоступна для {email}."
 
 async def sub_server(server_id, client_id, email):
-    """
-    Подключает клиента к серверу и получает информацию о подписке пользователя.
-
-    - Авторизует пользователя на сервере и получает данные о подписке.
-    - Если подписка активна, возвращает информацию о сроке действия и config.
-    """
     server_data = await get_server_data(server_id)
     if not server_data:
         return ""
-    try:
-        expiry_text = await sub_client(client_id, email, server_data)
-        if expiry_text:
-            # Получаем config из таблицы user_configs
-            conn = await get_db_connection()
-            config = "❗ Config не найден"
-            try:
-                cursor = conn.cursor()
-                cursor.execute(
-                    """
-                    SELECT config FROM user_configs WHERE email = ?
-                    """,
-                    (email,)
-                )
-                row = cursor.fetchone()
-                if row and row[0]:
-                    config = row[0]
-            except Exception as e:
-                logger.error(f"[sub_server] Ошибка при получении config: {e}")
-                config = "❗ Ошибка получения config"
-            finally:
-                conn.close()
 
-            return (
-                f"👤 <b>Ваш айди</b>: {email}\n"
-                f"{expiry_text}\n\n"
-                f"🔑 <b>Ваш ключ</b>:\n\n<pre><code>{config}</code></pre>\n"
-                f"*нажмите, что бы скопировать☝️\n\n"
-                f"🚨 <b>Тех поддержка</b>: @moy_help\n\n"
-                f"<b>Инструкция для каждого устройства по кнопке ниже</b> 👇"
-            )
+    try:
+        expiry_time = await sub_client(client_id, email, server_data)
+        if expiry_time is None:
+            return ""
+
+        # Обработка подписки
+        if expiry_time < 0:
+            # Специальный случай: подписка не активирована
+            expiry_text = "✅ Активируйте конфигурацию в приложении."
+            days_left = -1
+        else:
+            expiry_dt = dt.fromtimestamp(expiry_time / 1000)
+            days_left = (expiry_dt.date() - datetime.now().date()).days
+
+            if days_left > 0:
+                expiry_text = f"📅 <b>Подписка действует до</b>: {expiry_dt.strftime('%Y-%m-%d')} (осталось <b>{days_left}</b> дн.)"
+            elif days_left == 0:
+                expiry_text = "❌ <b>Ваша подписка закончилась</b>"
+
+        # Получаем config и обновляем days_left в БД
+        conn = await get_db_connection()
+        config = "❗ Config не найден"
+        try:
+            cursor = conn.cursor()
+            cursor.execute("SELECT config FROM user_configs WHERE email = ?", (email,))
+            row = cursor.fetchone()
+            if row and row[0]:
+                config = row[0]
+
+            # Сохраняем актуальное количество дней
+            cursor.execute("UPDATE user_configs SET days_left = ? WHERE email = ?", (days_left, email))
+            conn.commit()
+
+        except Exception as e:
+            logger.error(f"[sub_server] Ошибка при работе с БД: {e}")
+            config = "❗ Ошибка получения config"
+        finally:
+            conn.close()
+
+        return (
+            f"👤 <b>Ваш айди</b>: {email}\n"
+            f"{expiry_text}\n\n"
+            f"🔑 <b>Ваш ключ</b>:\n\n<pre><code>{config}</code></pre>\n"
+            f"*нажмите, чтобы скопировать☝️\n\n"
+            f"🚨 <b>Тех поддержка</b>: @moy_help\n\n"
+            f"<b>Инструкция для каждого устройства по кнопке ниже</b> 👇"
+        )
+
     except Exception as e:
         logger.error(f"Ошибка при подключении к серверу {server_id}: {e}")
     return ""
 
-
-
 async def sub_client(client_id, email, server_data):
-    """
-    Авторизует клиента на сервере и получает данные о подписке.
-
-    Отправляет запрос на сервер для получения информации о подписке.
-    Если подписка активна, возвращает срок действия подписки.
-    """
     LOGIN_DATA = {
         "username": server_data["username"],
         "password": server_data["password"],
@@ -343,17 +348,12 @@ async def sub_client(client_id, email, server_data):
         all_inbound_ids = server_data.get("inbound_ids", [])
         tasks = [fetch_inbound_data(session, inbound_id, email, server_data) for inbound_id in all_inbound_ids]
         results = await asyncio.gather(*tasks)
-        return next((result for result in results if result), None)
+        return next((result for result in results if result is not None), None)
 
 
 async def fetch_inbound_data(session, inbound_id, email, server_data):
     """
-    Получает данные inbound для заданного ID и проверяет статус подписки клиента.
-
-    Эта функция извлекает данные конфигурации inbound для указанного inbound ID
-    с сервера и проверяет, существует ли клиент с указанным логином в конфигурации.
-    Если клиент найден, функция возвращает срок действия подписки или соответствующее
-    сообщение в зависимости от статуса подписки.
+    Возвращает timestamp окончания подписки (expiryTime) для клиента или None, если не найден.
     """
     inbound_url = f"{server_data['config_client_url']}/{inbound_id}"
     inbound_response = await session.get(inbound_url, headers={'Accept': 'application/json'})
@@ -370,10 +370,9 @@ async def fetch_inbound_data(session, inbound_id, email, server_data):
     client = next((client for client in clients if client['email'] == email), None)
     if not client:
         return None
+
     expiry_time = int(client['expiryTime'])
-    if expiry_time < 0:
-        return "✅ Активируйте конфигурацию в приложении."
-    return f"📅 <b>Подписка действует до</b>: {dt.fromtimestamp(expiry_time / 1000).strftime('%Y-%m-%d')}"
+    return expiry_time  # Возвращаем только timestamp
 
 
 @router.callback_query(lambda c: c.data.startswith('extend_subscription_'))
