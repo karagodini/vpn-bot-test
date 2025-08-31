@@ -290,50 +290,55 @@ async def ask_to_confirm_tariff(callback_query: types.CallbackQuery, state: FSMC
 async def confirmed_expiry_time(callback_query: types.CallbackQuery, state: FSMContext):
     logger.info(f"Пользователь {callback_query.from_user.id} подтвердил срок действия подписки.")
 
-    # Этап 1: Получение данных из состояния
     data = await state.get_data()
     expiry_time = data.get("pending_expiry_time")
 
     if not expiry_time:
-        logger.warning(f"Пользователь {callback_query.from_user.id} пытается подтвердить, но expiry_time не найден в состоянии.")
+        logger.warning(f"Пользователь {callback_query.from_user.id} пытается подтвердить, но expiry_time не найден.")
         await callback_query.answer("Ошибка: тариф не выбран.", show_alert=True)
         return
 
-    logger.debug(f"Получен pending_expiry_time: {expiry_time} для пользователя {callback_query.from_user.id}")
+    logger.debug(f"pending_expiry_time: {expiry_time} для пользователя {callback_query.from_user.id}")
 
     telegram_id = callback_query.from_user.id
     name = generate_login(telegram_id)
     email = "default@mail.ru"
     user_promo_code = None
 
-    # Этап 2: Выбор оптимального сервера
+    # --- Выбор сервера ---
     logger.info(f"Начало выбора оптимального сервера для пользователя {telegram_id} (режим 'random')")
     selected_server = await get_optimal_server("random", server_db)
 
+    if selected_server is None:
+        logger.error(f"get_optimal_server вернул None для пользователя {telegram_id}")
+        await callback_query.answer("❌ Не удалось выбрать сервер.", show_alert=True)
+        return
+
+    # Проверяем, строка ли это
     if isinstance(selected_server, str):
-        if "занят" in selected_server.lower():
-            logger.warning(f"Все серверы заняты. Ответ от get_optimal_server: {selected_server}")
+        if "занят" in selected_server.lower() or "no available" in selected_server.lower():
+            logger.warning(f"Все серверы заняты: {selected_server}")
             await callback_query.answer("❌ Все серверы в этой группе заняты. Попробуйте позже.", show_alert=True)
             return
         else:
-            logger.warning(f"Получена строка от get_optimal_server, но не 'занят': {selected_server}")
-            await callback_query.answer("❌ Не удалось выбрать сервер.", show_alert=True)
-            return
-    elif not selected_server:
-        logger.error(f"get_optimal_server вернул None или пустое значение для пользователя {telegram_id}")
+            # Это может быть ID сервера в виде строки, например "2"
+            try:
+                selected_server = int(selected_server)  # Пробуем преобразовать
+                logger.info(f"Преобразована строка в ID сервера: {selected_server}")
+            except ValueError:
+                logger.error(f"Некорректная строка от get_optimal_server: {selected_server}")
+                await callback_query.answer("❌ Не удалось выбрать сервер.", show_alert=True)
+                return
+    elif isinstance(selected_server, int):
+        pass  # всё ок
+    else:
+        logger.error(f"Неожиданный тип от get_optimal_server: {type(selected_server)}, значение: {selected_server}")
         await callback_query.answer("❌ Не удалось выбрать сервер.", show_alert=True)
         return
 
-    # Этап 3: Проверка и преобразование ID сервера
-    if not str(selected_server).isdigit():
-        logger.error(f"Некорректный формат ID сервера: {selected_server} (тип: {type(selected_server)})")
-        await callback_query.answer("❌ Не удалось выбрать сервер.", show_alert=True)
-        return
-
-    selected_server = int(selected_server)
     logger.info(f"Выбран сервер с ID: {selected_server} для пользователя {telegram_id}")
 
-    # Этап 4: Сохранение данных в FSM
+    # --- Сохранение в FSM ---
     await state.update_data({
         "expiry_time": expiry_time,
         "email": email,
@@ -344,10 +349,8 @@ async def confirmed_expiry_time(callback_query: types.CallbackQuery, state: FSMC
     })
     logger.debug(f"Состояние FSM обновлено: expiry_time={expiry_time}, name={name}, selected_server={selected_server}")
 
-    # Этап 5: Получение данных сервера
-    logger.info(f"Запрос данных сервера с ID {selected_server}")
+    # --- Получение данных сервера ---
     server_data = await get_server_data(selected_server)
-
     if not server_data:
         logger.error(f"Данные сервера с ID {selected_server} не найдены.")
         await callback_query.message.answer("❌ Сервер не найден.")
@@ -355,7 +358,7 @@ async def confirmed_expiry_time(callback_query: types.CallbackQuery, state: FSMC
 
     logger.info(f"Получены данные сервера: {server_data['name']} ({server_data['server_ip']})")
 
-    # Этап 6: Сохранение данных сервера в FSM
+    # --- Сохранение данных сервера ---
     await state.update_data({
         "selected_country_name": server_data.get("name"),
         "login_data": {"username": server_data['username'], "password": server_data['password']},
@@ -366,14 +369,11 @@ async def confirmed_expiry_time(callback_query: types.CallbackQuery, state: FSMC
         "sub_url": server_data['sub_url'],
         "json_sub": server_data['json_sub'],
     })
-    logger.debug(f"Данные сервера сохранены в FSM: {server_data['name']}")
 
-    # Этап 7: Установка состояния
+    # --- Переход к следующему шагу ---
     await state.set_state(AddClient.WaitingForPaymentMethod)
-    logger.info(f"Состояние пользователя {telegram_id} установлено: WaitingForPaymentMethod")
 
-    # Этап 8: Имитация выбора метода оплаты
-    logger.info(f"Имитация выбора метода оплаты: YooKassa для пользователя {telegram_id}")
+    # --- Имитация выбора метода оплаты ---
     fake_callback = types.CallbackQuery(
         id=callback_query.id,
         from_user=callback_query.from_user,
@@ -386,12 +386,11 @@ async def confirmed_expiry_time(callback_query: types.CallbackQuery, state: FSMC
         await handle_payment_method_selection(fake_callback, state)
         logger.info(f"Успешно вызван handle_payment_method_selection для пользователя {telegram_id}")
     except Exception as e:
-        logger.exception(f"Ошибка при вызове handle_payment_method_selection для пользователя {telegram_id}: {e}")
+        logger.exception(f"Ошибка при вызове handle_payment_method_selection: {e}")
         await callback_query.message.answer("❌ Произошла ошибка при обработке оплаты. Попробуйте позже.")
 
-    # Этап 9: Подтверждение callback
     await callback_query.answer()
-    logger.info(f"Callback подтверждён для пользователя {telegram_id}. Процесс выбора подписки завершён.")
+    logger.info(f"Callback подтверждён для пользователя {telegram_id}.")
 
 
 

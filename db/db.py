@@ -374,19 +374,7 @@ async def update_user_trial_status(telegram_id: int) -> bool:
 
 async def insert_or_update_user(telegram_id, email, server_id):
     """
-    Вставляет или обновляет пользователя и его данные электронной почты в базе данных.
-
-    Функция проверяет, существует ли пользователь с указанным Telegram ID. Если такой пользователь существует,
-    проверяет, есть ли у него запись с данным логином подписки и server_id. Если записи нет, то добавляется новая. Если пользователя
-    не существует, создается новый пользователь с заданным Telegram ID, и добавляется запись в таблицу user_emails.
-
-    Аргументы:
-        telegram_id (int): Telegram ID пользователя.
-        email (str): Логин подписки пользователя.
-        server_id (str): ID сервера, с которым связан пользователь.
-
-    Возвращает:
-        int: ID пользователя, для которого была выполнена вставка или обновление.
+    Вставляет запись в user_emails, автоматически подтягивая telegram_id из таблицы users.
     """
     conn_users = await get_db_connection()
     try:
@@ -398,32 +386,32 @@ async def insert_or_update_user(telegram_id, email, server_id):
 
         if user_id_result:
             user_id = user_id_result[0]
-
-            # Проверяем, существует ли запись с указанным email и server_id для данного пользователя
-            cursor_users.execute(
-                "SELECT 1 FROM user_emails WHERE user_id = ? AND email = ? AND id_server = ?", 
-                (user_id, email, server_id)
-            )
-            if not cursor_users.fetchone():
-                # Если такой записи нет, добавляем новую
-                cursor_users.execute(
-                    "INSERT INTO user_emails (user_id, email, id_server) VALUES (?, ?, ?)",
-                    (user_id, email, server_id)
-                )
         else:
-            # Если пользователя не существует, создаём нового
+            # Создаём нового пользователя
             cursor_users.execute("INSERT INTO users (telegram_id) VALUES (?)", (telegram_id,))
             user_id = cursor_users.lastrowid
 
-            # Добавляем запись в user_emails
-            cursor_users.execute(
-                "INSERT INTO user_emails (user_id, email, id_server) VALUES (?, ?, ?)",
-                (user_id, email, server_id)
-            )
+        # Проверяем, есть ли уже такая запись (избегаем дублей)
+        cursor_users.execute(
+            "SELECT 1 FROM user_emails WHERE user_id = ? AND email = ? AND id_server = ?",
+            (user_id, email, server_id)
+        )
+        if not cursor_users.fetchone():
+            # Вставляем, подтягивая telegram_id из таблицы users
+            cursor_users.execute("""
+                INSERT INTO user_emails (user_id, email, id_server, telegram_id)
+                SELECT ?, ?, ?, telegram_id
+                FROM users
+                WHERE id = ?
+            """, (user_id, email, server_id, user_id))
 
-        # Фиксируем изменения в базе данных
         conn_users.commit()
         return user_id
+
+    except Exception as e:
+        logger.error(f"Ошибка в insert_or_update_user: {e}")
+        conn_users.rollback()
+        raise
     finally:
         conn_users.close()
 
@@ -619,22 +607,18 @@ def init_referal_table():
 
 async def increment_referral_clicks(code: str, conn: aiosqlite.Connection):
     """
-    Увеличивает счётчик кликов по реферальной ссылке:
-    - В таблице referals (если есть)
-    - В таблице users (для владельца кода)
+    Увеличивает счетчик кликов по реферальной ссылке
     :param code: Реферальный код
-    :param conn: Активное соединение с базой данных
+    :param conn: Активное соединение с базой данных (должно передаваться извне)
     """
     try:
-        # Увеличиваем clicks в таблице referals (если запись есть)
         await conn.execute(
             "UPDATE referals SET clicks = clicks + 1 WHERE code = ?", 
             (code,)
         )
-
-        # COMMIT делается вне функции (в вызывающем коде)
+        # Не нужно явно коммитить, если соединение управляется извне
     except Exception as e:
-        logger.error(f"Ошибка при увеличении счётчика кликов для кода {code}: {e}")
+        logger.error(f"Ошибка при увеличении счетчика кликов для кода {code}: {e}")
         raise
 
 async def get_referral_info_by_code(code: str):

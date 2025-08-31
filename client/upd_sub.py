@@ -75,20 +75,14 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 @router.callback_query(lambda callback_query: callback_query.data == "extend_subscription")
 async def handle_get_config2(callback_query: types.CallbackQuery, state: FSMContext):
-    """
-    Обрабатывает запрос пользователя на продление подписки, проверяя наличие конфигураций для пользователя.
-
-    - Извлекает логин пользователя из базы данных.
-    - Получает информацию о подписках пользователя.
-    - Отображает информацию о текущих подписках с возможностью их продления.
-    - Добавляет кнопки для продления подписки с выбором логина подписки.
-    """
     telegram_id = callback_query.from_user.id
-    logger.info(f"DEBUG: Используется telegram_id {telegram_id}")
+    logger.info(f"✅ [handle_get_config2] Начало обработки для telegram_id={telegram_id}")
 
     emails = await get_emails_from_database(telegram_id)
+    logger.info(f"📧 [handle_get_config2] Найденные emails: {emails}")
+
     if not emails:
-        logger.error(f"DEBUG: Не найдено email для telegram_id {telegram_id}")
+        logger.error(f"❌ [handle_get_config2] Не найдено email для telegram_id {telegram_id}")
         keyboard = InlineKeyboardBuilder()
         keyboard.add(InlineKeyboardButton(text=BUTTON_TEXTS["previous"], callback_data="main_menu"))
         keyboard.adjust(1)
@@ -99,58 +93,62 @@ async def handle_get_config2(callback_query: types.CallbackQuery, state: FSMCont
         )
         return
 
-    responses = await gather_in_chunks([from_upd_sub(email) for email in emails], chunk_size=10)
-    keyboard = InlineKeyboardBuilder()
-    full_response = []
+    # Запускаем from_upd_sub для каждого email
+    responses = await gather_in_chunks([from_upd_sub(email) for email in emails], chunk_size=5)
+    logger.info(f"📨 [handle_get_config2] Ответы от from_upd_sub: {responses!r}")
 
-    # Кнопки продления подписки
+    full_response = []
+    keyboard = InlineKeyboardBuilder()
+
     for email, response in zip(emails, responses):
-        if response:
+        logger.info(f"🔍 [handle_get_config2] email={email}, response length={len(response) if response else 0}, content={response}")
+        if response and response.strip():  # убедимся, что не пусто
             full_response.append(response)
-            if "📅 <b>Подписка действует до</b>:" in response:
-                keyboard.add(InlineKeyboardButton(
+            keyboard.add(
+                InlineKeyboardButton(
                     text=f"🔑 Продлить подписку",
                     callback_data=f"extend_subscription_{email}"
-                ))
+                )
+            )
+        else:
+            logger.warning(f"⚠️ [handle_get_config2] Пустой ответ для email: {email}")
 
-    keyboard.adjust(1)  # <--- Важно: 1 колонка для подписок
+    keyboard.adjust(1)
+
+    instruction_keyboard = InlineKeyboardBuilder()
+    instruction_keyboard.add(
+        InlineKeyboardButton(text="🍏 IOS", callback_data="show_instruction_ios"),
+        InlineKeyboardButton(text="📱 Android", callback_data="show_instruction_android"),
+        InlineKeyboardButton(text="💻 MacOS", callback_data="show_instruction_macos"),
+        InlineKeyboardButton(text="🖥 Windows", callback_data="show_instruction_windows"),
+    )
+    instruction_keyboard.adjust(2)
+
+    main_menu_keyboard = InlineKeyboardBuilder()
+    main_menu_keyboard.add(
+        InlineKeyboardButton(text=BUTTON_TEXTS["previous"], callback_data="main_menu")
+    )
+    main_menu_keyboard.adjust(1)
+
+    keyboard.attach(instruction_keyboard)
+    keyboard.attach(main_menu_keyboard)
 
     if full_response:
         response_text = "\n\n".join(full_response)
-
-        # Клавиатура инструкций (отдельный builder с 2 колонками)
-        instruction_keyboard = InlineKeyboardBuilder()
-        instruction_keyboard.add(
-            InlineKeyboardButton(text="🍏 IOS", callback_data="show_instruction_ios"),
-            InlineKeyboardButton(text="📱 Android", callback_data="show_instruction_android"),
-            InlineKeyboardButton(text="💻 MacOS", callback_data="show_instruction_macos"),
-            InlineKeyboardButton(text="🖥 Windows", callback_data="show_instruction_windows"),
-        )
-        instruction_keyboard.adjust(2)  # <--- Важно: 2 колонки для инструкций
-
-        # Кнопка main_menu (отдельный builder с 1 колонкой)
-        main_menu_keyboard = InlineKeyboardBuilder()
-        main_menu_keyboard.add(
-            InlineKeyboardButton(text=BUTTON_TEXTS["previous"], callback_data="main_menu")
-        )
-        main_menu_keyboard.adjust(1)  # <--- Важно: 1 колонка
-
-        # Собираем всё
-        keyboard.attach(instruction_keyboard)
-        keyboard.attach(main_menu_keyboard)
-
+        logger.info(f"📤 [handle_get_config2] Отправляем текст:\n{response_text}")
         await callback_query.message.edit_text(
             response_text,
             reply_markup=keyboard.as_markup(),
             parse_mode="HTML"
         )
     else:
-        keyboard = InlineKeyboardBuilder()
-        keyboard.add(InlineKeyboardButton(text=BUTTON_TEXTS["previous"], callback_data="main_menu"))
-        keyboard.adjust(1)
+        logger.warning("📭 [handle_get_config2] full_response пустой — показываем заглушку")
+        keyboard_fallback = InlineKeyboardBuilder()
+        keyboard_fallback.add(InlineKeyboardButton(text=BUTTON_TEXTS["previous"], callback_data="main_menu"))
+        keyboard_fallback.adjust(1)
         await callback_query.message.edit_text(
-            "❌ Не удалось найти активных подписок.",
-            reply_markup=keyboard.as_markup(),
+            "❌ Не удалось найти активные или завершённые подписки.",
+            reply_markup=keyboard_fallback.as_markup(),
             parse_mode="HTML"
         )
 
@@ -259,80 +257,146 @@ async def process_instruction_callback_windows(callback_query: types.CallbackQue
 
 async def from_upd_sub(email: str):
     """
-    Получает информацию о подписках пользователя по логину и серверу, а также выводит данные о текущих подписках.
-
-    - Извлекает данные серверов и идентификаторов клиентов из базы данных.
-    - Выполняет запросы к серверам для получения информации о подписках пользователя.
-    - Формирует ответ с информацией о подписке или сообщением об ошибке.
+    Получает статус подписки по email. Поддерживает несколько серверов.
     """
-    server_ids = await get_server_id(SERVEDATABASE)
+    logger.info(f"🔄 [from_upd_sub] Запрос статуса для email={email}")
+
+    # Шаг 1: Получаем список (client_id, server_id)
     db = Database(USERSDATABASE)
-    client_ids = await db.get_ids_by_email(email)
+    client_server_pairs = await db.get_ids_by_email(email)  # Например: [(123, 1), (456, 2)]
 
-    if not client_ids:
-        return f"❌ Не удалось найти клиента с email: {email}"
-    responses = await gather_in_chunks(
-        [sub_server(server_id, client_id, email) for client_id in client_ids for server_id in server_ids], 
-        chunk_size=5
-    )
-    return "\n\n".join(filter(None, responses)) if responses else f"❌ Прошлая конфигурация уже недоступна для {email}."
+    if not client_server_pairs:
+        logger.warning(f"🔍 [from_upd_sub] Нет данных для email={email}")
+        return f"👤 <b>Ваш айди</b>: {email}\nℹ️ Нет данных о клиенте."
 
-async def sub_server(server_id, client_id, email):
-    server_data = await get_server_data(server_id)
-    if not server_data:
-        return ""
-
+    # Шаг 2: Запрашиваем статус по каждому серверу
     try:
-        expiry_time = await sub_client(client_id, email, server_data)
-        if expiry_time is None:
-            return ""
+        responses = await gather_in_chunks([
+            sub_server(server_id=sid, client_id=cid, email=email)
+            for cid, sid in client_server_pairs
+        ], chunk_size=5)
 
-        # Обработка подписки
-        if expiry_time < 0:
-            # Специальный случай: подписка не активирована
-            expiry_text = "✅ Активируйте конфигурацию в приложении."
-            days_left = -1
-        else:
-            expiry_dt = dt.fromtimestamp(expiry_time / 1000)
-            days_left = (expiry_dt.date() - datetime.now().date()).days
-
-            if days_left > 0:
-                expiry_text = f"📅 <b>Подписка действует до</b>: {expiry_dt.strftime('%Y-%m-%d')} (осталось <b>{days_left}</b> дн.)"
-            elif days_left == 0:
-                expiry_text = "❌ <b>Ваша подписка закончилась</b>"
-
-        # Получаем config и обновляем days_left в БД
-        conn = await get_db_connection()
-        config = "❗ Config не найден"
-        try:
-            cursor = conn.cursor()
-            cursor.execute("SELECT config FROM user_configs WHERE email = ?", (email,))
-            row = cursor.fetchone()
-            if row and row[0]:
-                config = row[0]
-
-            # Сохраняем актуальное количество дней
-            cursor.execute("UPDATE user_configs SET days_left = ? WHERE email = ?", (days_left, email))
-            conn.commit()
-
-        except Exception as e:
-            logger.error(f"[sub_server] Ошибка при работе с БД: {e}")
-            config = "❗ Ошибка получения config"
-        finally:
-            conn.close()
-
-        return (
-            f"👤 <b>Ваш айди</b>: {email}\n"
-            f"{expiry_text}\n\n"
-            f"🔑 <b>Ваш ключ</b>:\n\n<pre><code>{config}</code></pre>\n"
-            f"*нажмите, чтобы скопировать☝️\n\n"
-            f"🚨 <b>Тех поддержка</b>: @moy_help\n\n"
-            f"<b>Инструкция для каждого устройства по кнопке ниже</b> 👇"
-        )
+        valid_responses = [r for r in responses if r and r.strip()]
+        if valid_responses:
+            return "\n\n".join(valid_responses)
 
     except Exception as e:
-        logger.error(f"Ошибка при подключении к серверу {server_id}: {e}")
-    return ""
+        logger.error(f"⚠️ [from_upd_sub] Ошибка при запросе к серверам: {e}")
+
+    # Шаг 3: Fallback — читаем из user_configs
+    logger.info(f"🔁 [from_upd_sub] Используем fallback для {email}")
+    try:
+        async with aiosqlite.connect("users.db") as conn:
+            async with conn.execute(
+                "SELECT days_left FROM user_configs WHERE email = ?",
+                (email,)
+            ) as cursor:
+                row = await cursor.fetchone()
+                days_left = row[0] if row else None
+
+        status = (
+            "❌ <b>Ваша подписка закончилась</b>" if days_left is None or days_left <= 0
+            else f"📅 Осталось <b>{days_left}</b> дн."
+        )
+        return f"👤 <b>Ваш айди</b>: {email}\n{status}"
+
+    except Exception as e:
+        logger.error(f"❌ [from_upd_sub] Fallback не удался: {e}")
+        return f"👤 <b>Ваш айди</b>: {email}\n⚠️ Статус неизвестен"
+
+async def sub_server(server_id, client_id, email):
+    """
+    Возвращает статус подписки для одного клиента на одном сервере.
+    Обновляет days_left в user_configs на основе актуальных данных с сервера.
+    """
+    logger.info(f"⚙️ [sub_server] Запрос: email={email}, server_id={server_id}, client_id={client_id}")
+
+    # Получаем данные сервера
+    server_data = await get_server_data(server_id)
+    if not server_data:
+        logger.warning(f"❌ [sub_server] Не найдены данные для server_id={server_id}")
+        # Продолжаем в режиме кэша
+
+    # Шаг 1: Получаем config и days_left из user_configs (кэш)
+    config = "❗ Config не найден"
+    days_left = None
+
+    try:
+        async with aiosqlite.connect("users.db") as conn:
+            async with conn.execute(
+                "SELECT config, days_left FROM user_configs WHERE email = ?",
+                (email,)
+            ) as cursor:
+                row = await cursor.fetchone()
+                if row:
+                    config = row[0] if row[0] else config
+                    if row[1] is not None:
+                        days_left = int(row[1])
+    except Exception as e:
+        logger.error(f"🔧 [sub_server] Ошибка чтения user_configs: {e}")
+
+    expiry_text = None
+
+    # Шаг 2: Пытаемся получить актуальные данные с сервера
+    if server_data:
+        try:
+            expiry_time = await sub_client(client_id, email, server_data)
+            if expiry_time is not None and expiry_time > 0:
+                expiry_dt = dt.fromtimestamp(expiry_time / 1000)
+                now = dt.now().date()
+                days_left = (expiry_dt.date() - now).days
+
+                # Обновляем days_left в БД
+                try:
+                    async with aiosqlite.connect("users.db") as conn:
+                        await conn.execute(
+                            "UPDATE user_configs SET days_left = ? WHERE email = ?",
+                            (days_left, email)
+                        )
+                        await conn.commit()
+                    logger.info(f"✅ [sub_server] days_left обновлён: {days_left} для {email}")
+                except Exception as e:
+                    logger.error(f"💾 [sub_server] Ошибка обновления days_left: {e}")
+
+                # Формируем текст статуса
+                if days_left > 0:
+                    expiry_text = f"📅 <b>Подписка действует до</b>: {expiry_dt.strftime('%Y-%m-%d')} (осталось <b>{days_left}</b> дн.)"
+                elif days_left == 0:
+                    expiry_text = "🟡 <b>Сегодня заканчивается ваша подписка</b>"
+                else:
+                    expiry_text = "❌ <b>Ваша подписка закончилась</b>"
+
+            elif expiry_time == 0 or expiry_time < 0:
+                expiry_text = "✅ Активируйте конфигурацию в приложении."
+                days_left = -1
+
+        except Exception as e:
+            logger.error(f"📡 [sub_server] Ошибка при запросе к серверу {server_id}: {e}")
+
+    # Шаг 3: Если с сервера не получили — используем кэш
+    if not expiry_text:
+        if days_left is not None:
+            if days_left > 0:
+                expiry_text = f"📅 <b>Статус (кэш)</b>: Осталось <b>{days_left}</b> дн."
+            elif days_left == 0:
+                expiry_text = "🟡 <b>Сегодня заканчивается ваша подписка</b>"
+            else:
+                expiry_text = "❌ <b>Ваша подписка закончилась</b>"
+        else:
+            expiry_text = "❌ <b>Ваша подписка закончилась</b>"
+
+    # Шаг 4: Формируем итоговое сообщение
+    result = (
+        f"👤 <b>Ваш айди</b>: {email}\n"
+        f"{expiry_text}\n\n"
+        f"🔑 <b>Ваш ключ</b>:\n\n<pre><code>{config}</code></pre>\n"
+        f"*нажмите, чтобы скопировать☝️\n\n"
+        f"🚨 <b>Тех поддержка</b>: @moy_help\n\n"
+        f"<b>Инструкция для каждого устройства по кнопке ниже</b> 👇"
+    )
+
+    logger.info(f"✅ [sub_server] Сформирован ответ для {email}: {result[:200]}...")
+    return result
 
 async def sub_client(client_id, email, server_data):
     LOGIN_DATA = {
@@ -932,6 +996,7 @@ async def update_client_subscription(telegram_id, email, days):
     Обновляет подписку клиента на всех серверах, используя дни.
     """
     server_ids = await get_server_id(SERVEDATABASE)
+    server_ids = [sid for sid in server_ids if sid]  # убираем None, 0, ''
     full_response = []
     for server_id in server_ids:
         server_data = await get_server_data(server_id)

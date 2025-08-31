@@ -17,6 +17,99 @@ load_dotenv()
 USERSDATABASE = os.getenv("USERSDATABASE")
 SERVEDATABASE = os.getenv("SERVEDATABASE")
 
+async def check_all_user_subscriptions():
+    """
+    Проверяет все подписки через user_configs.days_left
+    и отправляет уведомления пользователям через telegram_id из user_emails.
+    """
+    logger.info("🔄 Запущена проверка всех подписок по days_left")
+
+    async with aiosqlite.connect("users.db") as conn:
+        # Выполняем JOIN всех таблиц
+        async with conn.execute("""
+            SELECT 
+                uc.email,
+                uc.days_left,
+                u.telegram_id,
+                u.notified_after_3_days,
+                u.notified_after_7_days
+            FROM user_configs uc
+            JOIN user_emails ue ON uc.email = ue.email
+            JOIN users u ON ue.user_id = u.id
+            WHERE u.telegram_id IS NOT NULL
+        """) as cursor:
+            rows = await cursor.fetchall()
+
+    if not rows:
+        logger.info("📭 Нет пользователей для проверки.")
+        return
+
+    for email, days_left, telegram_id, notified_3d, notified_7d in rows:
+        try:
+            # === 1. Уведомления ДО окончания 3 ===
+            if days_left == 3:
+                await send_subscription_notification(
+                    telegram_id,
+                    f"🛡 MoyVPN — твой щит истекает через 3 дня\nЛогин: {email}\n\n⏳ Через 3 дня защита отключится — сайты начнут блокироваться, скорость упадёт, а слежка вернётся.\n\n💡 Продли сейчас, чтобы не остаться без защиты даже на минуту.\n\n💳 Всего 90 ₽ / мес — и ты всегда под защитой.",
+                    InlineKeyboardButton(text="Продлить подписку", callback_data="extend_subscription")
+                )
+
+            # === 2. До окончания (days_left == 2) ===
+            elif days_left == 2:
+                await send_subscription_notification(
+                    telegram_id,
+                    f"⚡ MoyVPN: осталось 2 дня до отключения\nЛогин: {email}\n\n⏳ Через 48 часов защита отключится — блокировки вернутся, скорость просядет, а слежка усилится.\n\n📌 Продли сейчас — останешься в сети без перебоев и без лишних настроек.\n\n💳 Всего 90 ₽ / мес — и ни один сайт не заблокируют.",
+                    InlineKeyboardButton(text="Продлить подписку", callback_data="extend_subscription")
+                )
+
+            # === 2. До окончания (days_left == 1) ===
+            elif days_left == 1:
+                await send_subscription_notification(
+                    telegram_id,
+                    f"⛔ Завтра MoyVPN отключится\nЛогин: {email}\n\n⚠️ С завтрашнего дня — сайты под блокировкой, интернет медленный, данные без защиты.\n🔥 Не дай отключить свой VPN — продли сейчас и останься в безопасности.\n\n💳 Всего 90 ₽ / мес — 30 дней свободы и скорости.",
+                    InlineKeyboardButton(text="Продлить подписку", callback_data="extend_subscription")
+                )
+
+            # === 2. В день окончания (days_left == 0) ===
+            elif days_left == -1:
+                await send_subscription_notification(
+                    telegram_id,
+                    f"🚀 MoyVPN снова в строю — для тебя за 90 ₽!\n\n⏳ Подписка {email} уже закончилась.\n\n⚠️ Без VPN: сайты блокируются, игры лагают, слежка усиливается.\n\n🔥 С VPN: полная свобода, скорость, защита данных.\n\n💳 Всего 90 ₽ / мес — это меньше, чем чашка кофе, но даёт тебе интернет без границ.\n\n👉 Продлить за 10 секунд и вернуть свободу!",
+                    InlineKeyboardButton(text="Продлить подписку", callback_data="extend_subscription")
+                )
+
+            # === 2. В день окончания (days_left == 0) ===
+            elif days_left == 0:
+                await send_subscription_notification(
+                    telegram_id,
+                    f"🚀 MoyVPN снова в строю — для тебя за 90 ₽!\n\n⏳ Подписка {email} уже закончилась.\n\n⚠️ Без VPN: сайты блокируются, игры лагают, слежка усиливается.\n\n🔥 С VPN: полная свобода, скорость, защита данных.\n\n💳 Всего 90 ₽ / мес — это меньше, чем чашка кофе, но даёт тебе интернет без границ.\n\n👉 Продлить за 10 секунд и вернуть свободу!",
+                    InlineKeyboardButton(text="Продлить подписку", callback_data="extend_subscription")
+                )
+
+            # === 3. Через 3 дня после окончания (days_left == -3) и если ещё не отправляли ===
+            elif days_left == -3 and not notified_3d:
+                await send_subscription_notification(
+                    telegram_id,
+                    f"Мы скучаем! 🫂\n\nТы пропустил MoyVPN уже 3 дня.\n\nВозьми 3 дня бесплатно — попробуй снова!",
+                    InlineKeyboardButton(text="Получить 3 дня бесплатно", callback_data="free_trial_3days")
+                )
+                await update_notified_flag(telegram_id, "notified_after_3_days")
+
+            # === 4. Через 7 дней после окончания (days_left == -7) и если ещё не отправляли ===
+            elif days_left == -7 and not notified_7d:
+                await send_subscription_notification(
+                    telegram_id,
+                    f"Финальный шанс! 🔥\n\nТы давно не заходил.\n\nПопробуй ещё 3 дня бесплатно — вдруг снова понравится?",
+                    InlineKeyboardButton(text="Попробовать бесплатно", callback_data="free_trial_3days")
+                )
+                await update_notified_flag(telegram_id, "notified_after_7_days")
+
+            else:
+                logger.debug(f"Пропускаем {email}: days_left={days_left}, флаги={notified_3d}/{notified_7d}")
+
+        except Exception as e:
+            logger.error(f"❌ Ошибка при обработке пользователя {telegram_id} ({email}): {e}")
+
 async def scheduled_check_subscriptions():
     """
     Запускает проверки подписок для всех клиентов на всех серверах.
@@ -95,12 +188,12 @@ async def process_inbound_clients(inbound_id, server_data, headers, current_date
 
 async def check_client_subscription(client, current_date):
     """
-    Проверяет подписку клиента и отправляет уведомления:
-    - за 3, 2, 1 день до окончания
-    - в день окончания
-    - через 3 и 7 дней после окончания (с кнопкой бесплатного теста)
+    Проверяет подписку клиента по days_left из user_configs.
+    Отправляет уведомления:
+    - за 3, 2, 1 день до окончания (days_left = 3,2,1)
+    - при days_left = 0 (в день окончания)
+    - при days_left = -3, -7 (если ещё не отправляли)
     """
-    expiry_time = client.get('expiryTime')
     email = client.get('email')
     telegram_id = client.get('tgId')
 
@@ -109,42 +202,45 @@ async def check_client_subscription(client, current_date):
         return
 
     async with aiosqlite.connect("users.db") as conn:
+        # Получаем days_left из user_configs по email
+        async with conn.execute(
+            "SELECT days_left FROM user_configs WHERE email = ?", (email,)
+        ) as cursor:
+            result = await cursor.fetchone()
+            if result is None:
+                logger.warning(f"Конфиг для email {email} не найден в user_configs.")
+                return
+            days_left = result[0]
+
+        # Получаем флаги уведомлений и has_trial из users
         async with conn.execute(
             "SELECT has_trial, sum_my, notified_after_3_days, notified_after_7_days FROM users WHERE telegram_id = ?",
             (telegram_id,)
         ) as cursor:
             result = await cursor.fetchone()
             if result is None:
-                logger.warning(f"Пользователь с Telegram ID {telegram_id} не найден в базе.")
+                logger.warning(f"Пользователь с Telegram ID {telegram_id} не найден.")
                 return
             has_trial, sum_my, notified_3d, notified_7d = result
 
-    if expiry_time is None or expiry_time < 0:
-        logger.info(f"Пропускаем клиента {email}, срок подписки истек или не задан.")
-        return
-
-    expiry_date = datetime.fromtimestamp(expiry_time / 1000).date()
-    logger.info(f"Дата окончания подписки для {email}: {expiry_date}")
-
     # === 1. Уведомления ДО окончания (за 3, 2, 1 день) ===
-    for days_left in [3, 2, 1]:
-        if current_date + td(days=days_left) == expiry_date:
-            await send_subscription_notification(
-                telegram_id,
-                f"Хай! Это не СПАМ-сообщение ‼️\n\n⏳ До окончания вашей подписки {email} осталось {days_left} {get_days_word(days_left)}!\n\nЧтобы не остаться без любимых сайтов и приложений — продлите подписку заранее!",
-                InlineKeyboardButton(text=BUTTON_TEXTS["extend_subscription"], callback_data="extend_subscription")
-            )
-
-    # === 2. В день окончания ===
-    if current_date == expiry_date:
+    if days_left in [3, 2, 1]:
         await send_subscription_notification(
             telegram_id,
-            f"Хэй, на связи MoyVPN!\n\nТвоя подписка, c логином {email}, закончилась.\n\nНо ты уже оценил наш щит от слежки и блокировок.\n\nПродли за 80 руб/мес — получи защиту, скорость и свободу!",
+            f"Хай! Это не СПАМ-сообщение ‼️\n\n⏳ До окончания вашей подписки {email} осталось {days_left} {get_days_word(days_left)}!\n\nЧтобы не остаться без любимых сайтов и приложений — продлите подписку заранее!",
+            InlineKeyboardButton(text=BUTTON_TEXTS["extend_subscription"], callback_data="extend_subscription")
+        )
+
+    # === 2. В день окончания (days_left == 0) ===
+    elif days_left == 0:
+        await send_subscription_notification(
+            telegram_id,
+            f"Хэй, на связи MoyVPN!\n\nТвоя подписка, c логином {email}, закончилась.\n\nНо ты уже оценил наш щит от слежки и блокировок.\n\nПродли за 90 руб/мес — получи защиту, скорость и свободу!",
             InlineKeyboardButton(text=BUTTON_TEXTS["extend_subscription_subscr"], callback_data="extend_subscription")
         )
 
-    # === 3. Через 3 дня после окончания ===
-    if current_date == expiry_date + td(days=3) and not notified_3d:
+    # === 3. Через 3 дня после окончания (days_left == -3) и если ещё не отправляли ===
+    elif days_left == -3 and not notified_3d:
         await send_subscription_notification(
             telegram_id,
             f"Мы скучаем! 🫂\n\nТы пропустил MoyVPN уже 3 дня.\n\nВозьми 3 дня бесплатно — попробуй снова!",
@@ -153,8 +249,8 @@ async def check_client_subscription(client, current_date):
         await conn.execute("UPDATE users SET notified_after_3_days = 1 WHERE telegram_id = ?", (telegram_id,))
         await conn.commit()
 
-    # === 4. Через 7 дней после окончания ===
-    if current_date == expiry_date + td(days=7) and not notified_7d:
+    # === 4. Через 7 дней после окончания (days_left == -7) и если ещё не отправляли ===
+    elif days_left == -7 and not notified_7d:
         await send_subscription_notification(
             telegram_id,
             f"Финальный шанс! 🔥\n\nТы давно не заходил.\n\nПопробуй ещё 3 дня бесплатно — вдруг снова понравится?",
@@ -163,18 +259,24 @@ async def check_client_subscription(client, current_date):
         await conn.execute("UPDATE users SET notified_after_7_days = 1 WHERE telegram_id = ?", (telegram_id,))
         await conn.commit()
 
+    else:
+        logger.debug(f"Пропускаем уведомление для {email}, days_left = {days_left}")
+
 
 async def send_subscription_notification(telegram_id, notification_text, button=None):
-    """
-    Отправляет уведомление клиенту через Telegram.
-    Формирует и отправляет сообщение с опциональной кнопкой.
-    """
     try:
-        keyboard = InlineKeyboardBuilder().add(button) if button else None
-        await bot.send_message(telegram_id, notification_text, reply_markup=keyboard.as_markup())
-        logger.info(f"Уведомление отправлено пользователю с ID {telegram_id}")
+        keyboard = InlineKeyboardBuilder().add(button).as_markup() if button else None
+        await bot.send_message(telegram_id, notification_text, reply_markup=keyboard)
+        logger.info(f"✅ Уведомление отправлено пользователю {telegram_id}")
     except Exception as e:
-        logger.error(f"Ошибка при отправке уведомления пользователю {telegram_id}: {e}")
+        logger.error(f"❌ Не удалось отправить сообщение {telegram_id}: {e}")
+
+async def update_notified_flag(telegram_id, column_name):
+    """Обновляет флаг (например, notified_after_3_days) в таблице users"""
+    async with aiosqlite.connect("users.db") as conn:
+        await conn.execute(f"UPDATE users SET {column_name} = 1 WHERE telegram_id = ?", (telegram_id,))
+        await conn.commit()
+    logger.info(f"📌 Флаг {column_name} установлен для пользователя {telegram_id}")
 
 def get_days_word(days):
     """
@@ -314,3 +416,170 @@ async def send_inactive_users_broadcast():
             failed += 1
 
     logger.info(f"Успешно отправлено сообщений (неактивные пользователи): {successful}, не удалось отправить: {failed}")
+
+async def get_server_ids_as_list_for_days_left(db_path):
+    """
+    Получает список ID всех серверов из таблицы 'servers' в БД.
+    """
+    try:
+        async with aiosqlite.connect(db_path) as conn:
+            async with conn.execute("SELECT id FROM servers") as cursor:
+                rows = await cursor.fetchall()
+                server_ids = [row[0] for row in rows]
+                logger.info(f"✅ Загружены server_ids из servers: {server_ids}")
+                return server_ids
+    except Exception as e:
+        logger.error(f"❌ Ошибка при получении server_ids из таблицы servers: {e}")
+        return []
+
+async def update_all_days_left_on_startup():
+    """
+    Синхронизирует days_left в user_configs с данными с серверов.
+    Для каждого email из user_configs ищет клиента на всех серверах.
+    """
+    logger.info("🔄 [sync_user_configs_with_servers] Начало синхронизации всех email из user_configs...")
+
+    # Шаг 1: Получаем все email из user_configs
+    try:
+        async with aiosqlite.connect("users.db") as conn:
+            async with conn.execute("SELECT email FROM user_configs") as cursor:
+                rows = await cursor.fetchall()
+                emails = [row[0] for row in rows]
+        logger.info(f"📁 Найдено {len(emails)} email'ов в user_configs: {emails}")
+    except Exception as e:
+        logger.error(f"❌ Ошибка чтения user_configs: {e}")
+        return
+
+    if not emails:
+        logger.info("📭 Нет email'ов в user_configs — синхронизация пропущена.")
+        return
+
+    # Шаг 2: Получаем список ID серверов
+    try:
+        server_ids = await get_server_ids_as_list_for_days_left("servers.db")
+        if not server_ids:
+            logger.warning("📭 Нет серверов для синхронизации.")
+            return
+        logger.info(f"🌐 Найдено {len(server_ids)} серверов: {server_ids}")
+    except Exception as e:
+        logger.error(f"❌ Ошибка получения списка серверов: {e}")
+        return
+
+    updated_count = 0
+
+    # Шаг 3: Обрабатываем каждый сервер отдельно
+    for server_id in server_ids:
+        logger.info(f"🔁 Обработка сервера: ID={server_id}")
+
+        # Получаем данные сервера
+        server_data = await get_server_data(server_id)
+        if not server_data:
+            logger.warning(f"❌ Не удалось получить данные сервера {server_id}")
+            continue
+
+        logger.info(f"🌐 Подключаемся к серверу {server_id} ({server_data['name']})")
+
+        # Создаём отдельную сессию для каждого сервера
+        async with aiohttp.ClientSession() as session:
+            try:
+                # Логинимся
+                login_data = {
+                    "username": server_data["username"],
+                    "password": server_data["password"]
+                }
+                async with session.post(server_data["login_url"], json=login_data) as login_resp:
+                    if login_resp.status != 200:
+                        text = await login_resp.text()
+                        logger.error(f"❌ Ошибка входа на сервер {server_id}: {text}")
+                        continue
+
+                    cookies = login_resp.cookies
+                    session_id = cookies.get('3x-ui').value
+                    if not session_id:
+                        logger.error(f"❌ Не получен session_id с сервера {server_id}")
+                        continue
+
+                    headers = {'Accept': 'application/json', 'Cookie': f'3x-ui={session_id}'}
+
+                found_any = False  # Флаг: найден ли хоть один email на этом сервере
+
+                # Обрабатываем каждый inbound
+                for inbound_id in server_data["inbound_ids"]:
+                    url = f"{server_data['config_client_url']}/{inbound_id}"
+                    logger.info(f"🔍 Запрашиваем inbound {inbound_id} на сервере {server_id}")
+
+                    try:
+                        async with session.get(url, headers=headers) as resp:
+                            if resp.status != 200:
+                                text = await resp.text()
+                                logger.error(f"❌ Ошибка получения inbound {inbound_id}: {text}")
+                                continue
+
+                            data = await resp.json()
+                            obj = data.get('obj')
+                            if not obj:
+                                logger.warning(f"⚠️ Пустой obj в ответе inbound {inbound_id}")
+                                continue
+
+                            settings = obj.get('settings')
+                            if not settings:
+                                logger.warning(f"⚠️ Нет settings в inbound {inbound_id}")
+                                continue
+
+                            try:
+                                clients = json.loads(settings).get('clients', [])
+                            except Exception as e:
+                                logger.error(f"❌ Ошибка парсинга clients: {e}")
+                                continue
+
+                            logger.info(f"📥 Сервер {server_id}, inbound {inbound_id}: получено {len(clients)} клиентов")
+
+                            # Проверяем каждого клиента
+                            for client in clients:
+                                email = client.get('email')
+                                expiry_time = client.get('expiryTime')
+
+                                if not email:
+                                    logger.debug(f"🟡 Пропускаем клиента без email: {client}")
+                                    continue
+
+                                if email in emails:
+                                    found_any = True
+
+                                    # Рассчитываем days_left
+                                    if expiry_time is None or expiry_time <= 0:
+                                        days_left = -1
+                                        status = "не активирована"
+                                    else:
+                                        expiry_dt = datetime.fromtimestamp(expiry_time / 1000)
+                                        days_left = (expiry_dt.date() - datetime.now().date()).days
+                                        status = f"осталось {days_left} дн."
+
+                                    logger.info(f"🎯 НАЙДЕН: {email} на сервере {server_id} → expiry_time={expiry_time}, статус: {status}")
+
+                                    # Обновляем в user_configs
+                                    try:
+                                        async with aiosqlite.connect("users.db") as conn:
+                                            await conn.execute(
+                                                "UPDATE user_configs SET days_left = ? WHERE email = ?",
+                                                (days_left, email)
+                                            )
+                                            await conn.commit()
+                                        logger.info(f"✅ [синхронизация] {email} → days_left = {days_left}")
+                                        updated_count += 1
+                                    except Exception as e:
+                                        logger.error(f"❌ Ошибка обновления {email} в БД: {e}")
+
+                                else:
+                                    logger.debug(f"ℹ️ email={email} есть на сервере, но отсутствует в user_configs")
+
+                    except Exception as e:
+                        logger.error(f"❌ Ошибка при запросе к inbound {inbound_id}: {e}")
+
+                if not found_any:
+                    logger.warning(f"🟡 Ни один из {len(emails)} email'ов НЕ НАЙДЕН на сервере {server_id}")
+
+            except Exception as e:
+                logger.error(f"❌ Критическая ошибка при работе с сервером {server_id}: {e}")
+
+    logger.info(f"✅ [sync_user_configs_with_servers] Синхронизация завершена. Обновлено {updated_count} записей.")
