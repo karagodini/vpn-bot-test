@@ -178,7 +178,7 @@ def create_payment_yookassa(amount, chat_id, name, expiry_time, email):
 
         # Формируем описание подписки
         expiry_time_text = get_expiry_time_description(expiry_time)
-        description = f"Оплата подписки, логин: {name} на {expiry_time_text}"
+        description = f"Оплата подписки, логин: 'MoyService' на {expiry_time_text}"
         logger.info(f"Описание платежа: {description}")
 
         # Подготовка данных для платежа

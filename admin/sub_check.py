@@ -12,6 +12,9 @@ from buttons.client import BUTTON_TEXTS
 from dotenv import load_dotenv
 import os
 from log import logger
+import sqlite3
+from client.add_client import login
+import requests
 load_dotenv()
 
 USERSDATABASE = os.getenv("USERSDATABASE")
