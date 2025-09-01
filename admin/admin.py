@@ -36,9 +36,10 @@ from aiogram.fsm.state import State, StatesGroup
 import random
 import string
 import logging
+import aiohttp
+import json
 from db.db import get_referral_info_by_code
 from aiogram.types import InlineKeyboardMarkup
-from admin.sub_check import cleanup_orphaned_clients_on_server_1
 
 logger = logging.getLogger(__name__)
 
@@ -47,7 +48,7 @@ from admin.delete_clients import get_inactive_clients, delete_depleted_clients
 from bot import bot
 from client.add_client import login
 from handlers.config import get_server_data
-from admin.sub_check import scheduled_check_subscriptions
+from admin.sub_check import scheduled_check_subscriptions, get_server_ids_as_list_for_days_left
 from handlers.states import BroadcastState, AddPromoCodeState, ManagePromoCodeState, ManageServerGroupState
 from buttons.admin import BUTTON_TEXTS
 from admin.delete_clients import scheduled_delete_clients
@@ -112,13 +113,18 @@ async def admin_panel(message: types.Message):
         types.KeyboardButton(text=BUTTON_TEXTS["delete_promo_code"])
     )
     keyboard.row(
-        types.KeyboardButton(text=BUTTON_TEXTS["delete_clients"]),
-        types.KeyboardButton(text=BUTTON_TEXTS["statistics"]),
-        types.KeyboardButton(text=BUTTON_TEXTS["top_referrers"])
+        types.KeyboardButton(text=BUTTON_TEXTS["delete_clients"])
+    )
+    keyboard.row(
+        types.KeyboardButton(text=BUTTON_TEXTS["top_referrers"]),
+        types.KeyboardButton(text=BUTTON_TEXTS["statistics"])
     )
     keyboard.row(
         types.KeyboardButton(text=BUTTON_TEXTS["work_with_servers"]),
         types.KeyboardButton(text=BUTTON_TEXTS["referrals"])
+    )
+    keyboard.row(
+        types.KeyboardButton(text=BUTTON_TEXTS["days_sub"])
     )
     keyboard.row(
         types.KeyboardButton(text=BUTTON_TEXTS["backup"]),
@@ -974,3 +980,191 @@ def create_ref_stats_keyboard():
     kb = InlineKeyboardBuilder()
     kb.button(text="🔄 Обновить", callback_data="refresh_ref_stats")
     return kb.as_markup()
+
+@router.message(F.text == BUTTON_TEXTS["days_sub"])
+async def update_all_days_left_on_startup(message: types.Message):
+    """
+    Обработчик кнопки: синхронизирует days_left в user_configs с данными с серверов.
+    """
+    # Удаляем сообщение с кнопкой, чтобы не засорять чат
+    await message.delete()
+
+    # Отправляем уведомление пользователю
+    sent_message = await message.answer(
+        "🔄 Начинаю синхронизацию данных с серверов...\n"
+        "⏳ Пожалуйста, подождите, это может занять некоторое время.",
+        parse_mode=ParseMode.HTML
+    )
+
+    logger.info("🔄 [sync_user_configs_with_servers] Начало синхронизации всех email из user_configs...")
+
+    # Шаг 1: Получаем все email из user_configs
+    try:
+        async with aiosqlite.connect("users.db") as conn:
+            async with conn.execute("SELECT email FROM user_configs") as cursor:
+                rows = await cursor.fetchall()
+                emails = [row[0] for row in rows]
+        logger.info(f"📁 Найдено {len(emails)} email'ов в user_configs: {emails}")
+    except Exception as e:
+        logger.error(f"❌ Ошибка чтения user_configs: {e}")
+        await sent_message.edit_text(
+            "❌ Ошибка при чтении данных из базы.\n"
+            "Подробнее в логах.",
+            parse_mode=ParseMode.HTML
+        )
+        return
+
+    if not emails:
+        logger.info("📭 Нет email'ов в user_configs — синхронизация пропущена.")
+        await sent_message.edit_text(
+            "📭 Нет пользователей для синхронизации.",
+            parse_mode=ParseMode.HTML
+        )
+        return
+
+    # Шаг 2: Получаем список ID серверов
+    try:
+        server_ids = await get_server_ids_as_list_for_days_left("servers.db")
+        if not server_ids:
+            logger.warning("📭 Нет серверов для синхронизации.")
+            await sent_message.edit_text(
+                "📭 Нет доступных серверов для синхронизации.",
+                parse_mode=ParseMode.HTML
+            )
+            return
+        logger.info(f"🌐 Найдено {len(server_ids)} серверов: {server_ids}")
+    except Exception as e:
+        logger.error(f"❌ Ошибка получения списка серверов: {e}")
+        await sent_message.edit_text(
+            "❌ Ошибка получения списка серверов.",
+            parse_mode=ParseMode.HTML
+        )
+        return
+
+    updated_count = 0
+
+    # Шаг 3: Обрабатываем каждый сервер отдельно
+    for server_id in server_ids:
+        logger.info(f"🔁 Обработка сервера: ID={server_id}")
+
+        # Получаем данные сервера
+        server_data = await get_server_data(server_id)
+        if not server_data:
+            logger.warning(f"❌ Не удалось получить данные сервера {server_id}")
+            continue
+
+        logger.info(f"🌐 Подключаемся к серверу {server_id} ({server_data['name']})")
+
+        # Создаём отдельную сессию для каждого сервера
+        async with aiohttp.ClientSession() as session:
+            try:
+                # Логинимся
+                login_data = {
+                    "username": server_data["username"],
+                    "password": server_data["password"]
+                }
+                async with session.post(server_data["login_url"], json=login_data) as login_resp:
+                    if login_resp.status != 200:
+                        text = await login_resp.text()
+                        logger.error(f"❌ Ошибка входа на сервер {server_id}: {text}")
+                        continue
+
+                    cookies = login_resp.cookies
+                    session_id = cookies.get('3x-ui').value
+                    if not session_id:
+                        logger.error(f"❌ Не получен session_id с сервера {server_id}")
+                        continue
+
+                    headers = {'Accept': 'application/json', 'Cookie': f'3x-ui={session_id}'}
+
+                found_any = False  # Флаг: найден ли хоть один email на этом сервере
+
+                # Обрабатываем каждый inbound
+                for inbound_id in server_data["inbound_ids"]:
+                    url = f"{server_data['config_client_url']}/{inbound_id}"
+                    logger.info(f"🔍 Запрашиваем inbound {inbound_id} на сервере {server_id}")
+
+                    try:
+                        async with session.get(url, headers=headers) as resp:
+                            if resp.status != 200:
+                                text = await resp.text()
+                                logger.error(f"❌ Ошибка получения inbound {inbound_id}: {text}")
+                                continue
+
+                            data = await resp.json()
+                            obj = data.get('obj')
+                            if not obj:
+                                logger.warning(f"⚠️ Пустой obj в ответе inbound {inbound_id}")
+                                continue
+
+                            settings = obj.get('settings')
+                            if not settings:
+                                logger.warning(f"⚠️ Нет settings в inbound {inbound_id}")
+                                continue
+
+                            try:
+                                clients = json.loads(settings).get('clients', [])
+                            except Exception as e:
+                                logger.error(f"❌ Ошибка парсинга clients: {e}")
+                                continue
+
+                            logger.info(f"📥 Сервер {server_id}, inbound {inbound_id}: получено {len(clients)} клиентов")
+
+                            # Проверяем каждого клиента
+                            for client in clients:
+                                email = client.get('email')
+                                expiry_time = client.get('expiryTime')
+
+                                if not email:
+                                    logger.debug(f"🟡 Пропускаем клиента без email: {client}")
+                                    continue
+
+                                if email in emails:
+                                    found_any = True
+
+                                    # Рассчитываем days_left
+                                    if expiry_time is None or expiry_time <= 0:
+                                        days_left = -1
+                                        status = "не активирована"
+                                    else:
+                                        expiry_dt = datetime.fromtimestamp(expiry_time / 1000)
+                                        days_left = (expiry_dt.date() - datetime.now().date()).days
+                                        status = f"осталось {days_left} дн."
+
+                                    logger.info(f"🎯 НАЙДЕН: {email} на сервере {server_id} → expiry_time={expiry_time}, статус: {status}")
+
+                                    # Обновляем в user_configs
+                                    try:
+                                        async with aiosqlite.connect("users.db") as conn:
+                                            await conn.execute(
+                                                "UPDATE user_configs SET days_left = ? WHERE email = ?",
+                                                (days_left, email)
+                                            )
+                                            await conn.commit()
+                                        logger.info(f"✅ [синхронизация] {email} → days_left = {days_left}")
+                                        updated_count += 1
+                                    except Exception as e:
+                                        logger.error(f"❌ Ошибка обновления {email} в БД: {e}")
+
+                                else:
+                                    logger.debug(f"ℹ️ email={email} есть на сервере, но отсутствует в user_configs")
+
+                    except Exception as e:
+                        logger.error(f"❌ Ошибка при запросе к inbound {inbound_id}: {e}")
+
+                if not found_any:
+                    logger.warning(f"🟡 Ни один из {len(emails)} email'ов НЕ НАЙДЕН на сервере {server_id}")
+
+            except Exception as e:
+                logger.error(f"❌ Критическая ошибка при работе с сервером {server_id}: {e}")
+
+    logger.info(f"✅ [sync_user_configs_with_servers] Синхронизация завершена. Обновлено {updated_count} записей.")
+
+    # Отправляем финальное сообщение пользователю
+    await sent_message.edit_text(
+        f"✅ Синхронизация завершена!\n"
+        f"📊 Обновлено записей: <b>{updated_count}</b>\n"
+        f"🔍 Проверено email'ов: <b>{len(emails)}</b>\n"
+        f"🌐 На {len(server_ids)} серверах.",
+        parse_mode=ParseMode.HTML
+    )

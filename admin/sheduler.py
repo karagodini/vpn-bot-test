@@ -10,8 +10,7 @@ from admin.sub_check import (
     send_no_trial_broadcast,
     send_promo_not_used_broadcast,
     send_inactive_users_broadcast,
-    check_all_user_subscriptions,
-    update_all_days_left_on_startup
+    check_all_user_subscriptions
 )
 from admin.delete_clients import scheduled_delete_clients
 
@@ -120,12 +119,6 @@ async def start_scheduler():
         logger.warning("⚠️ Попытка запустить уже запущенный планировщик.")
     except Exception as e:
         logger.error(f"❌ Ошибка при запуске планировщика: {e}")
-
-    try:
-        logger.info("🔁 Запуск обновления days_left при старте бота...")
-        await update_all_days_left_on_startup()
-    except Exception as e:
-        logger.error(f"❌ Ошибка при обновлении days_left при старте: {e}")
 
 
         
