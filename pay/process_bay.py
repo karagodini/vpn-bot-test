@@ -236,6 +236,7 @@ async def process_trial_subscription(callback_query: types.CallbackQuery, state:
     await callback_query.answer()
     logger.info(f"Обработка callback_query для пользователя {telegram_id} завершена.")
 
+
 @router.callback_query(lambda query: query.data == "trial_go")
 async def trial_go(callback_query: types.CallbackQuery, state: FSMContext):
     """

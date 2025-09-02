@@ -31,5 +31,15 @@ BUTTON_TEXTS = {
     "prodlit_podpisku": "Продлить подписку",
     "statistics_for_admin": "Статистика",
     "udalit_user": "Удалить",
-    "block_user": "Заблокировать"
+    "block_user": "Заблокировать",
+    "unblock_user": "Разблокировать",
+    "send_message_edit_user": "Отправить сообщение",
+    "user_not_found_edit_user": "❌ Пользователь не найден.",
+    "message_sent_edit_user": "✅ Сообщение отправлено пользователю:",
+    "message_send_error_edit_user": "❌ Не удалось отправить сообщение:",
+    "enter_message_edit_user": "✉️ Введите сообщение, которое хотите отправить:",
+    "confirm_delete_user_edit_user": "✅ Да, удалить",
+    "cancel_delete_user_edit_user": "❌ Нет, отмена",
+    "user_deleted_edit_user": "Пользователь удалён",
+    "user_delete_canceled_edit_user": "Удаление отменено",
 }

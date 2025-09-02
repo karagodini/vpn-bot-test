@@ -4,7 +4,7 @@ from apscheduler.schedulers import SchedulerAlreadyRunningError
 from apscheduler.triggers.interval import IntervalTrigger
 from contextlib import suppress
 from db.db import clean_referal_table
-
+from admin.admin import sync_days_left_from_servers
 from admin.sub_check import (
     check_subscription_expiry,
     send_no_trial_broadcast,
@@ -23,7 +23,8 @@ task_names = {
     "check_subscription_expiry": "Рассылка о скором окончании подписки",
     "send_no_trial_broadcast": "Рассылка пользователям без пробного периода",
     "send_promo_not_used_broadcast": "Рассылка о неиспользованных промокодах",
-    "send_inactive_users_broadcast": "Рассылка неактивным пользователям"
+    "send_inactive_users_broadcast": "Рассылка неактивным пользователям",
+    "sync_days_left_daily": "Синхронизация даты подписок"
 }
 
 tasks = {
@@ -31,6 +32,14 @@ tasks = {
         "function": check_all_user_subscriptions,
         "hour": 4,
         "minute": 37,
+        "enabled": True,
+        "days": "*"
+    },
+
+    "sync_days_left_daily": {
+        "function": sync_days_left_from_servers,
+        "hour": 0,        # В 03:00
+        "minute": 0,
         "enabled": True,
         "days": "*"
     },

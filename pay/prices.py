@@ -27,6 +27,7 @@ load_dotenv()
 USERSDATABASE = os.getenv("USERSDATABASE")
 # Количество дней в подписке, на выбранную дату, пробный, 1 месяц, 3, 6, 12
 TRIAL = 3
+TRIAL_SEVEN = 7
 ONE_M = 30
 THREE_M = 93
 ONE_YEAR = 365

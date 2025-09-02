@@ -120,6 +120,12 @@ def get_main_menu(callback_query: types.CallbackQuery):
     )
     builder.row(
         InlineKeyboardButton(
+            text=BUTTON_TEXTS["trial_seven"], 
+            callback_data="trial_seven"
+        )
+    )
+    builder.row(
+        InlineKeyboardButton(
             text=BUTTON_TEXTS["support"], 
             url=SUPPORT
         ),
@@ -167,3 +173,4 @@ def get_instructions_menu():
         InlineKeyboardButton(text=BUTTON_TEXTS["main_menu"], callback_data="main_menu")
     )
     return builder.adjust(1).as_markup()
+

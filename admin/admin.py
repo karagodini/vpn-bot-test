@@ -40,6 +40,7 @@ import aiohttp
 import json
 from db.db import get_referral_info_by_code
 from aiogram.types import InlineKeyboardMarkup
+from client.upd_sub import update_client_subscription
 
 logger = logging.getLogger(__name__)
 
@@ -210,6 +211,9 @@ async def start_broadcast(message: Message, state: FSMContext):
             InlineKeyboardButton(text="Все пользователи", callback_data="broadcast_audience:all")
         ],
         [
+            InlineKeyboardButton(text="Подписка закончилась", callback_data="send_to_expired")
+        ],
+        [
             InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_admin")
         ]
     ])
@@ -242,18 +246,111 @@ async def select_audience(callback: CallbackQuery, state: FSMContext):
     await state.set_state(BroadcastState.waiting_for_message)
     await callback.answer()
 
+
+# Добавим новое состояние для рассылки "подписка закончилась"
+class ExpiredSubscriptionBroadcast(StatesGroup):
+    waiting_for_message_zero = State()
+
+@router.callback_query(F.data == "send_to_expired")
+async def start_broadcast_expired(call: CallbackQuery, state: FSMContext):
+    await call.answer()
+
+    if call.from_user.id not in ADMIN_IDS:
+        await call.message.answer("❌ У вас нет прав.")
+        return
+
+    await call.message.edit_text(
+        "📬 Отправьте сообщение для пользователей с <b>законченной подпиской</b>.",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_admin")]
+        ]),
+        parse_mode="HTML"
+    )
+    await state.set_state(ExpiredSubscriptionBroadcast.waiting_for_message_zero)
+
+@router.message(
+    F.content_type.in_({'text', 'photo', 'document', 'video', 'audio'}),
+    ExpiredSubscriptionBroadcast.waiting_for_message_zero
+)
+async def broadcast_to_expired_subscribers(message: Message, state: FSMContext):
+    content_type = message.content_type
+
+    if content_type == ContentType.TEXT and message.text == '❌ Отмена':
+        await state.clear()
+        await message.answer('Рассылка отменена.')
+        return
+
+    # Собираем всех пользователей, у которых days_left <= 0
+    async with aiosqlite.connect("users.db") as conn:
+        # Нам нужно:
+        # users.telegram_id
+        # WHERE у пользователя есть email в user_emails
+        # И хотя бы один user_configs.days_left <= 0
+        query = """
+            SELECT DISTINCT u.telegram_id
+            FROM users u
+            JOIN user_emails ue ON u.id = ue.user_id
+            JOIN user_configs uc ON ue.email = uc.email
+            WHERE uc.days_left <= 0
+        """
+        async with conn.execute(query) as cursor:
+            rows = await cursor.fetchall()
+            users_data = [(row[0],) for row in rows]  # telegram_id
+
+    await state.clear()
+
+    if not users_data:
+        await message.answer("📭 Нет пользователей с законченной подпиской.")
+        return
+
+    audience_name = "пользователям с законченной подпиской"
+    await message.answer(
+        f"📬 Начинаю рассылку для <b>{audience_name}</b> на <b>{len(users_data)}</b> пользователей...",
+        parse_mode="HTML"
+    )
+
+    good_send, bad_send = await broadcast_message(
+        users_data=users_data,
+        text=message.text if content_type == ContentType.TEXT else None,
+        photo_id=message.photo[-1].file_id if content_type == ContentType.PHOTO else None,
+        document_id=message.document.file_id if content_type == ContentType.DOCUMENT else None,
+        video_id=message.video.file_id if content_type == ContentType.VIDEO else None,
+        audio_id=message.audio.file_id if content_type == ContentType.AUDIO else None,
+        caption=message.caption,
+        content_type=content_type
+    )
+
+    def pluralize(count):
+        if 11 <= count % 100 <= 19:
+            return "пользователей"
+        if count % 10 == 1:
+            return "пользователь"
+        if 2 <= count % 10 <= 4:
+            return "пользователя"
+        return "пользователей"
+
+    await message.answer(
+        f"✅ Рассылка завершена.\n"
+        f"📬 Получили: <b>{good_send}</b> {pluralize(good_send)}\n"
+        f"⛔ Не получили: <b>{bad_send}</b> {pluralize(bad_send)}",
+        parse_mode="HTML"
+    )
+
 @router.message(F.content_type.in_({'text', 'photo', 'document', 'video', 'audio'}), BroadcastState.waiting_for_message)
 async def universe_broadcast(message: Message, state: FSMContext):
     """Рассылка сообщений выбранной аудитории"""
     data = await state.get_data()
     audience_type = data.get("audience_type", "all")
     
-    # Формируем SQL запрос в зависимости от выбранной аудитории
+    # 🔽 Обновлённые SQL-запросы под точные условия
     if audience_type == "trial":
-        query = "SELECT telegram_id FROM users WHERE has_trial = 1"
+        # Пробная подписка: получил пробную, но не платил
+        query = "SELECT telegram_id FROM users WHERE has_trial = 1 AND sum_my = 0"
     elif audience_type == "paid":
+        # Оплаченная подписка: что-то заплатил
         query = "SELECT telegram_id FROM users WHERE sum_my > 0"
     elif audience_type == "no_sub":
+        # Без подписки: не получал пробную и не платил
         query = "SELECT telegram_id FROM users WHERE has_trial = 0 AND sum_my = 0"
     else:  # all
         query = "SELECT telegram_id FROM users"
@@ -265,6 +362,7 @@ async def universe_broadcast(message: Message, state: FSMContext):
 
     content_type = message.content_type
 
+    # Проверка на "Отмена"
     if content_type == ContentType.TEXT and message.text == '❌ Отмена':
         await state.clear()
         await message.answer('Рассылка отменена!')
@@ -272,6 +370,7 @@ async def universe_broadcast(message: Message, state: FSMContext):
 
     await state.clear()
     
+    # Названия аудитории
     audience_name = {
         "trial": "пользователям с пробной подпиской",
         "paid": "пользователям с оплаченной подпиской",
@@ -279,7 +378,7 @@ async def universe_broadcast(message: Message, state: FSMContext):
         "all": "всем пользователям"
     }.get(audience_type, "всем пользователям")
     
-    await message.answer(f'Начинаю рассылку ({audience_name}) на {len(users_data)} пользователей.')
+    await message.answer(f'📬 Начинаю рассылку для <b>{audience_name}</b> на <b>{len(users_data)}</b> пользователей.', parse_mode="HTML")
 
     good_send, bad_send = await broadcast_message(
         users_data=users_data,
@@ -302,9 +401,9 @@ async def universe_broadcast(message: Message, state: FSMContext):
         return "пользователей"
 
     await message.answer(
-        f"Рассылка ({audience_name}) завершена.\n"
-        f"Сообщение получило: <b>{good_send}</b> {pluralize_users(good_send)}.\n"
-        f"Не получили: <b>{bad_send}</b> {pluralize_users(bad_send)}.",
+        f"✅ Рассылка завершена.\n"
+        f"📬 Получили: <b>{good_send}</b> {pluralize_users(good_send)}\n"
+        f"⛔ Не получили: <b>{bad_send}</b> {pluralize_users(bad_send)}",
         parse_mode="HTML"
     )
 
@@ -982,195 +1081,104 @@ def create_ref_stats_keyboard():
     kb.button(text="🔄 Обновить", callback_data="refresh_ref_stats")
     return kb.as_markup()
 
-@router.message(F.text == BUTTON_TEXTS["days_sub"])
-async def update_all_days_left_on_startup(message: types.Message):
+
+
+async def sync_days_left_from_servers():
     """
-    Обработчик кнопки: синхронизирует days_left в user_configs с данными с серверов.
+    Синхронизирует days_left в user_configs с данными с серверов.
+    Может вызываться как по расписанию, так и по кнопке.
     """
-    # Удаляем сообщение с кнопкой, чтобы не засорять чат
-    await message.delete()
+    logger.info("🔄 [sync_days_left_from_servers] Начало синхронизации...")
 
-    # Отправляем уведомление пользователю
-    sent_message = await message.answer(
-        "🔄 Начинаю синхронизацию данных с серверов...\n"
-        "⏳ Пожалуйста, подождите, это может занять некоторое время.",
-        parse_mode=ParseMode.HTML
-    )
-
-    logger.info("🔄 [sync_user_configs_with_servers] Начало синхронизации всех email из user_configs...")
-
-    # Шаг 1: Получаем все email из user_configs
     try:
         async with aiosqlite.connect("users.db") as conn:
             async with conn.execute("SELECT email FROM user_configs") as cursor:
                 rows = await cursor.fetchall()
                 emails = [row[0] for row in rows]
-        logger.info(f"📁 Найдено {len(emails)} email'ов в user_configs: {emails}")
+        logger.info(f"📁 Найдено {len(emails)} email'ов в user_configs.")
     except Exception as e:
         logger.error(f"❌ Ошибка чтения user_configs: {e}")
-        await sent_message.edit_text(
-            "❌ Ошибка при чтении данных из базы.\n"
-            "Подробнее в логах.",
-            parse_mode=ParseMode.HTML
-        )
         return
 
     if not emails:
-        logger.info("📭 Нет email'ов в user_configs — синхронизация пропущена.")
-        await sent_message.edit_text(
-            "📭 Нет пользователей для синхронизации.",
-            parse_mode=ParseMode.HTML
-        )
+        logger.info("📭 Нет email'ов для синхронизации.")
         return
 
-    # Шаг 2: Получаем список ID серверов
     try:
         server_ids = await get_server_ids_as_list_for_days_left("servers.db")
         if not server_ids:
-            logger.warning("📭 Нет серверов для синхронизации.")
-            await sent_message.edit_text(
-                "📭 Нет доступных серверов для синхронизации.",
-                parse_mode=ParseMode.HTML
-            )
+            logger.warning("📭 Нет активных серверов.")
             return
-        logger.info(f"🌐 Найдено {len(server_ids)} серверов: {server_ids}")
     except Exception as e:
-        logger.error(f"❌ Ошибка получения списка серверов: {e}")
-        await sent_message.edit_text(
-            "❌ Ошибка получения списка серверов.",
-            parse_mode=ParseMode.HTML
-        )
+        logger.error(f"❌ Ошибка получения серверов: {e}")
         return
 
     updated_count = 0
 
-    # Шаг 3: Обрабатываем каждый сервер отдельно
     for server_id in server_ids:
-        logger.info(f"🔁 Обработка сервера: ID={server_id}")
-
-        # Получаем данные сервера
         server_data = await get_server_data(server_id)
         if not server_data:
-            logger.warning(f"❌ Не удалось получить данные сервера {server_id}")
             continue
 
-        logger.info(f"🌐 Подключаемся к серверу {server_id} ({server_data['name']})")
-
-        # Создаём отдельную сессию для каждого сервера
         async with aiohttp.ClientSession() as session:
             try:
-                # Логинимся
-                login_data = {
-                    "username": server_data["username"],
-                    "password": server_data["password"]
-                }
-                async with session.post(server_data["login_url"], json=login_data) as login_resp:
-                    if login_resp.status != 200:
-                        text = await login_resp.text()
-                        logger.error(f"❌ Ошибка входа на сервер {server_id}: {text}")
-                        continue
+                # Логин
+                login_resp = await session.post(
+                    server_data["login_url"],
+                    json={"username": server_data["username"], "password": server_data["password"]}
+                )
+                if login_resp.status != 200:
+                    continue
+                session_id = login_resp.cookies.get('3x-ui').value
+                headers = {'Accept': 'application/json', 'Cookie': f'3x-ui={session_id}'}
 
-                    cookies = login_resp.cookies
-                    session_id = cookies.get('3x-ui').value
-                    if not session_id:
-                        logger.error(f"❌ Не получен session_id с сервера {server_id}")
-                        continue
-
-                    headers = {'Accept': 'application/json', 'Cookie': f'3x-ui={session_id}'}
-
-                found_any = False  # Флаг: найден ли хоть один email на этом сервере
-
-                # Обрабатываем каждый inbound
                 for inbound_id in server_data["inbound_ids"]:
-                    url = f"{server_data['config_client_url']}/{inbound_id}"
-                    logger.info(f"🔍 Запрашиваем inbound {inbound_id} на сервере {server_id}")
+                    inbound_url = f"{server_data['config_client_url']}/{inbound_id}"
+                    resp = await session.get(inbound_url, headers=headers)
+                    if resp.status != 200:
+                        continue
+                    data = await resp.json()
+                    clients = json.loads(data['obj']['settings']).get('clients', [])
 
-                    try:
-                        async with session.get(url, headers=headers) as resp:
-                            if resp.status != 200:
-                                text = await resp.text()
-                                logger.error(f"❌ Ошибка получения inbound {inbound_id}: {text}")
-                                continue
+                    for client in clients:
+                        email = client.get('email')
+                        if not email or email not in emails:
+                            continue
 
-                            data = await resp.json()
-                            obj = data.get('obj')
-                            if not obj:
-                                logger.warning(f"⚠️ Пустой obj в ответе inbound {inbound_id}")
-                                continue
+                        expiry_time = client.get('expiryTime')
+                        if not expiry_time or expiry_time <= 0:
+                            days_left = -1
+                        else:
+                            expiry_dt = datetime.fromtimestamp(expiry_time / 1000)
+                            days_left = (expiry_dt.date() - datetime.now().date()).days
 
-                            settings = obj.get('settings')
-                            if not settings:
-                                logger.warning(f"⚠️ Нет settings в inbound {inbound_id}")
-                                continue
-
-                            try:
-                                clients = json.loads(settings).get('clients', [])
-                            except Exception as e:
-                                logger.error(f"❌ Ошибка парсинга clients: {e}")
-                                continue
-
-                            logger.info(f"📥 Сервер {server_id}, inbound {inbound_id}: получено {len(clients)} клиентов")
-
-                            # Проверяем каждого клиента
-                            for client in clients:
-                                email = client.get('email')
-                                expiry_time = client.get('expiryTime')
-
-                                if not email:
-                                    logger.debug(f"🟡 Пропускаем клиента без email: {client}")
-                                    continue
-
-                                if email in emails:
-                                    found_any = True
-
-                                    # Рассчитываем days_left
-                                    if expiry_time is None or expiry_time <= 0:
-                                        days_left = -1
-                                        status = "не активирована"
-                                    else:
-                                        expiry_dt = datetime.fromtimestamp(expiry_time / 1000)
-                                        days_left = (expiry_dt.date() - datetime.now().date()).days
-                                        status = f"осталось {days_left} дн."
-
-                                    logger.info(f"🎯 НАЙДЕН: {email} на сервере {server_id} → expiry_time={expiry_time}, статус: {status}")
-
-                                    # Обновляем в user_configs
-                                    try:
-                                        async with aiosqlite.connect("users.db") as conn:
-                                            await conn.execute(
-                                                "UPDATE user_configs SET days_left = ? WHERE email = ?",
-                                                (days_left, email)
-                                            )
-                                            await conn.commit()
-                                        logger.info(f"✅ [синхронизация] {email} → days_left = {days_left}")
-                                        updated_count += 1
-                                    except Exception as e:
-                                        logger.error(f"❌ Ошибка обновления {email} в БД: {e}")
-
-                                else:
-                                    logger.debug(f"ℹ️ email={email} есть на сервере, но отсутствует в user_configs")
-
-                    except Exception as e:
-                        logger.error(f"❌ Ошибка при запросе к inbound {inbound_id}: {e}")
-
-                if not found_any:
-                    logger.warning(f"🟡 Ни один из {len(emails)} email'ов НЕ НАЙДЕН на сервере {server_id}")
+                        async with aiosqlite.connect("users.db") as conn:
+                            await conn.execute(
+                                "UPDATE user_configs SET days_left = ? WHERE email = ?",
+                                (days_left, email)
+                            )
+                            await conn.commit()
+                        updated_count += 1
 
             except Exception as e:
-                logger.error(f"❌ Критическая ошибка при работе с сервером {server_id}: {e}")
+                logger.error(f"❌ Ошибка при обработке сервера {server_id}: {e}")
 
-    logger.info(f"✅ [sync_user_configs_with_servers] Синхронизация завершена. Обновлено {updated_count} записей.")
+    logger.info(f"✅ Синхронизация завершена. Обновлено: {updated_count} записей.")
 
-    # Отправляем финальное сообщение пользователю
-    await sent_message.edit_text(
-        f"✅ Синхронизация завершена!\n"
-        f"📊 Обновлено записей: <b>{updated_count}</b>\n"
-        f"🔍 Проверено email'ов: <b>{len(emails)}</b>\n"
-        f"🌐 На {len(server_ids)} серверах.",
-        parse_mode=ParseMode.HTML
-    )
+@router.message(F.text == BUTTON_TEXTS["days_sub"])
+async def update_all_days_left_on_startup(message: types.Message):
+    await message.delete()
+    sent_message = await message.answer("🔄 Синхронизация данных с серверов...")
 
-"""Блок редактирования пользователя"""
+    await sync_days_left_from_servers()  # ← вызов общей функции
+
+    await sent_message.edit_text("✅ Синхронизация завершена.")
+
+
+"""
+Блок редактирования пользователя
+
+"""
 class AdminUserSearch(StatesGroup):
     waiting_for_user_identifier = State()
 
@@ -1184,7 +1192,7 @@ async def edit_users_handler(message: Message, state: FSMContext):
         return
 
     sent_message = await message.answer(
-        "🆔 Введите <b>Telegram ID</b> или <b>@username</b> пользователя, с которым хотите работать:"
+        "🆔 Введите Telegram ID или @username пользователя, с которым хотите работать:"
     )
 
     await state.update_data(sent_message_id=sent_message.message_id, chat_id=sent_message.chat.id)
@@ -1224,7 +1232,10 @@ async def process_user_identifier(message: Message, state: FSMContext):
             user_data = None
 
     if not user_data:
-        await message.answer(f"❌ Пользователь с ссылкой <code>t.me/{search_username}</code> не найден.", parse_mode="HTML")
+        await message.answer(
+            f"❌ Пользователь с ссылкой <code>t.me/{search_username}</code> не найден.",
+            parse_mode="HTML"
+        )
         return
 
     # Сохраняем пользователя
@@ -1237,18 +1248,34 @@ async def process_user_identifier(message: Message, state: FSMContext):
         f"🔹 <b>Username:</b> @{user_data['username'] or 'не указан'}\n"
     )
 
-    # Кнопки действий
-    user_actions_keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=BUTTON_TEXTS["info_for_admin"], callback_data="user_info_for_admin")],
-        [InlineKeyboardButton(text=BUTTON_TEXTS["prodlit_podpisku"], callback_data="prodlit_podpisku")],
-        [InlineKeyboardButton(text=BUTTON_TEXTS["statistics_for_admin"], callback_data="user_stats_for_admin")],
-        [InlineKeyboardButton(text=BUTTON_TEXTS["block_user"], callback_data="block_user")],
-        [InlineKeyboardButton(text=BUTTON_TEXTS["udalit_user"], callback_data="udalit_user")],
-        [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_admin")]
-    ])
+    # 🔁 Генерируем клавиатуру с учётом статуса is_blocked
+    user_actions_keyboard = get_user_actions_keyboard(user_data)
 
     await message.answer(user_preview, reply_markup=user_actions_keyboard, parse_mode="HTML")
     await state.set_state(None)
+
+def get_user_actions_keyboard(target_user: dict) -> InlineKeyboardMarkup:
+    is_blocked = target_user['is_blocked']
+
+    buttons = [
+        [InlineKeyboardButton(text=BUTTON_TEXTS["info_for_admin"], callback_data="user_info_for_admin")],
+        [InlineKeyboardButton(text=BUTTON_TEXTS["prodlit_podpisku"], callback_data="prodlit_podpisku")],
+        [InlineKeyboardButton(text=BUTTON_TEXTS["statistics_for_admin"], callback_data="user_stats_for_admin")],
+    ]
+
+    # Добавляем кнопку блокировки/разблокировки
+    if is_blocked:
+        buttons.append([InlineKeyboardButton(text=BUTTON_TEXTS["unblock_user"], callback_data="unblock_user")])
+    else:
+        buttons.append([InlineKeyboardButton(text=BUTTON_TEXTS["block_user"], callback_data="block_user")])
+
+    buttons.append([InlineKeyboardButton(text=BUTTON_TEXTS["send_message_edit_user"], callback_data="send_message_edit_user")])
+
+    # Кнопка удаления и отмены
+    buttons.append([InlineKeyboardButton(text=BUTTON_TEXTS["udalit_user"], callback_data="udalit_user")])
+    buttons.append([InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_admin")])
+
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 @router.callback_query(lambda call: call.data == "user_info_for_admin")
 async def user_info_callback_for_admin(call: types.CallbackQuery, state: FSMContext):
@@ -1261,6 +1288,39 @@ async def user_info_callback_for_admin(call: types.CallbackQuery, state: FSMCont
         await call.message.edit_text("❌ Данные пользователя утеряны. Начните сначала.")
         return
 
+    # Получаем дополнительные данные из БД
+    user_details = None
+    configs = []
+
+    async with aiosqlite.connect("users.db") as conn:
+        cursor = await conn.cursor()
+
+        # Получаем email и id_server из user_emails по users.id
+        await cursor.execute("""
+            SELECT email, id_server 
+            FROM user_emails 
+            WHERE user_id = ?
+        """, (user_data['id'],))
+        emails_rows = await cursor.fetchall()
+
+        if emails_rows:
+            user_details = []
+            for email, id_server in emails_rows:
+                # Для каждого email получаем конфиги из user_configs
+                await cursor.execute("""
+                    SELECT config, days_left 
+                    FROM user_configs 
+                    WHERE email = ?
+                """, (email,))
+                configs_rows = await cursor.fetchall()
+
+                user_details.append({
+                    "email": email,
+                    "id_server": id_server,
+                    "configs": configs_rows or []
+                })
+
+    # Формируем текст сообщения
     full_info_text = (
         "📘 <b>Подробная информация о пользователе</b>\n\n"
         f"🔹 <b>ID в БД:</b> {user_data['id']}\n"
@@ -1274,79 +1334,495 @@ async def user_info_callback_for_admin(call: types.CallbackQuery, state: FSMCont
         f"🔹 <b>Заблокирован:</b> {'Да' if user_data['is_blocked'] else 'Нет'}\n"
     )
 
-    # Кнопка "Назад" ведёт в главное меню действий
+    # Добавляем информацию по email'ам
+    if user_details:
+        full_info_text += "\n📧 <b>Привязанные email и конфиги:</b>\n"
+        for idx, detail in enumerate(user_details, start=1):
+            email = detail["email"]
+            id_server = detail["id_server"]
+            configs = detail["configs"]
+
+            full_info_text += f"\n<b>📧 Email {idx}:</b> <code>{email}</code>\n"
+            full_info_text += f"🔹 <b>Сервер:</b> {id_server or '—'}\n"
+
+            if configs:
+                for i, (config, days_left) in enumerate(configs):
+                    full_info_text += f"  🔹 <b>Конфиг {i+1}:</b> <code>{config}</code>\n"
+                    full_info_text += f"     🔹 <b>Дней осталось:</b> {days_left if days_left != -1 else 'бессрочно'}\n"
+            else:
+                full_info_text += "  🔹 <b>Конфиги:</b> не найдены\n"
+    else:
+        full_info_text += "\n📧 <b>Email не найдены</b>"
+
+    # Кнопка "Назад"
     back_keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_actions")],
         [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_admin")]
     ])
 
-    await call.message.edit_text(full_info_text, reply_markup=back_keyboard, parse_mode="HTML")
+    try:
+        await call.message.edit_text(full_info_text, reply_markup=back_keyboard, parse_mode="HTML")
+    except Exception as e:
+        # Если текст слишком длинный — укорачиваем или делим на части
+        if "too long" in str(e).lower():
+            truncated_text = full_info_text[:3500] + "\n\n⚠️ Информация обрезана из-за длины."
+            await call.message.edit_text(truncated_text, reply_markup=back_keyboard, parse_mode="HTML")
+        else:
+            logger.error(f"Ошибка при отправке сообщения: {e}")
+            await call.message.edit_text("❌ Ошибка при отображении информации.", reply_markup=back_keyboard)
 
+class AdminSubscriptionExtension(StatesGroup):
+    waiting_for_days = State()
 
 @router.callback_query(lambda call: call.data == "prodlit_podpisku")
-async def prodlit_podpisku(call: types.CallbackQuery):
+async def prodlit_podpisku(call: types.CallbackQuery, state: FSMContext):
     await call.answer()
-    await call.message.edit_text("💳 Здесь можно продлить подписку.")
 
-
-@router.callback_query(lambda call: call.data == "user_stats_for_admin")
-async def user_stats_callback_for_admin(call: types.CallbackQuery):
-    await call.answer()
-    await call.message.edit_text("📊 Введите id пользователя для которого хотите посмотреть статистику.")
-
-
-@router.callback_query(lambda call: call.data == "block_user")
-async def block_user(call: types.CallbackQuery, state: FSMContext):
     data = await state.get_data()
     target_user = data.get("target_user")
 
     if not target_user:
-        await call.answer("❌ Пользователь не выбран.", show_alert=True)
+        await call.message.edit_text("❌ Пользователь не выбран.")
         return
 
-    if target_user['is_blocked']:
-        await call.message.edit_text("⚠️ Пользователь уже заблокирован.")
+    await call.message.edit_text(
+        f"👤 Вы выбрали пользователя:\n"
+        f"<b>{target_user['username']}</b> (ID: <code>{target_user['telegram_id']}</code>)\n\n"
+        "💳 Введите количество дней, на которое нужно продлить подписку:",
+        parse_mode="HTML"
+    )
+
+    await state.set_state(AdminSubscriptionExtension.waiting_for_days)
+    await state.update_data(target_user=target_user)
+
+@router.message(AdminSubscriptionExtension.waiting_for_days)
+async def process_extension_days(message: Message, state: FSMContext):
+    if not message.text.isdigit():
+        await message.answer("❌ Введите корректное число дней.")
         return
 
+    days = int(message.text)
+    if days <= 0 or days > 3650:
+        await message.answer("❌ Введите число от 1 до 3650.")
+        return
+
+    data = await state.get_data()
+    target_user = data.get("target_user")
+
+    if not target_user:
+        await message.answer("❌ Данные пользователя утеряны.")
+        return
+
+    telegram_id = target_user['telegram_id']
+    user_id_in_db = target_user['id']
+
+    # Получаем все email пользователя
+    async with aiosqlite.connect("users.db") as conn:
+        cursor = await conn.cursor()
+
+        await cursor.execute("SELECT email FROM user_emails WHERE user_id = ?", (user_id_in_db,))
+        emails_rows = await cursor.fetchall()
+
+        if not emails_rows:
+            await message.answer("❌ У пользователя нет привязанных email.")
+            return
+
+        emails = [row[0] for row in emails_rows]
+
+        # 📦 Обновляем days_left в user_configs (если не бессрочный)
+        updated_configs_count = 0
+        for email in emails:
+            await cursor.execute("""
+                UPDATE user_configs 
+                SET days_left = CASE 
+                    WHEN days_left = -1 THEN -1 
+                    ELSE COALESCE(days_left, 0) + ?
+                END
+                WHERE email = ?
+            """, (days, email))
+            updated_configs_count += cursor.rowcount
+
+        await conn.commit()
+
+    # 🌐 Обновляем подписку на сервере для каждого email
+    server_results = []
+    for email in emails:
+        try:
+            result = await update_client_subscription(telegram_id, email, days)
+            server_results.append(result)
+        except Exception as e:
+            logger.error(f"Ошибка при обновлении подписки на сервере для {email}: {e}")
+            server_results.append(f"❌ Ошибка для {email}: {str(e)}")
+
+    # 📢 Формируем итоговое сообщение
+    success_count = sum(1 for r in server_results if "успешно" in r or "success" in r)
+    failed_count = len(server_results) - success_count
+
+    result_text = (
+        f"✅ Подписка продлена на <b>{days} дней</b>.\n\n"
+        f"📊 <b>Результаты:</b>\n"
+        f"🔹 В БД бота обновлено конфигов: <b>{updated_configs_count}</b>\n"
+        f"🔹 На сервере успешно: <b>{success_count}</b>\n"
+        f"🔹 Ошибок на сервере: <b>{failed_count}</b>\n"
+    )
+
+    if failed_count > 0:
+        result_text += f"\n❌ Подробности ошибок:\n" + "\n".join(f"<code>{r}</code>" for r in server_results if "❌" in r)
+
+    # Кнопка "Назад"
+    back_keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_actions")],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_admin")]
+    ])
+
+    await message.answer(result_text, reply_markup=back_keyboard, parse_mode="HTML")
+
+    await state.set_state(None)
+
+
+@router.callback_query(lambda call: call.data == "user_stats_for_admin")
+async def user_stats_callback_for_admin(call: types.CallbackQuery, state: FSMContext):
+    await call.answer()
+
+    data = await state.get_data()
+    target_user = data.get("target_user")
+
+    if not target_user:
+        await call.message.edit_text("❌ Данные пользователя утеряны. Начните сначала.")
+        return
+
+    telegram_id = target_user['telegram_id']  # Это и есть TARGET_USER_ID для статистики
+
+    try:
+        async with aiosqlite.connect("users.db") as db:
+            # Количество рефералов
+            async with db.execute(
+                "SELECT COUNT(*) FROM users WHERE referred_by = ?", (telegram_id,)
+            ) as cursor:
+                count_row = await cursor.fetchone()
+                count_referrals = count_row[0] if count_row else 0
+
+            # Сумма sum_my от рефералов
+            async with db.execute(
+                "SELECT COALESCE(SUM(sum_my), 0) FROM users WHERE referred_by = ?", (telegram_id,)
+            ) as cursor:
+                sum_row = await cursor.fetchone()
+                total_sum = sum_row[0] if sum_row else 0.0
+
+        # Формируем ответ
+        stats_text = (
+            f"📊 <b>Реферальная статистика пользователя</b>\n\n"
+            f"👤 <b>Telegram ID:</b> <code>{telegram_id}</code>\n"
+            f"👥 <b>Всего рефералов:</b> <b>{count_referrals}</b>\n"
+            f"💰 <b>Заработано (sum_my):</b> <b>{total_sum:.2f}</b> руб."
+        )
+
+        # Кнопка "Назад"
+        back_keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_actions")],
+            [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_admin")]
+        ])
+
+        await call.message.edit_text(stats_text, reply_markup=back_keyboard, parse_mode="HTML")
+
+    except Exception as e:
+        logger.error(f"Ошибка при получении статистики для {telegram_id}: {e}")
+        await call.message.edit_text(
+            "❌ Произошла ошибка при получении статистики.",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_actions")]])
+        )
+
+
+@router.callback_query(lambda call: call.data == "block_user")
+async def block_user(call: types.CallbackQuery, state: FSMContext):
+    await call.answer()
+
+    data = await state.get_data()
+    target_user = data.get("target_user")
+
+    if not target_user:
+        await call.message.edit_text("❌ Данные пользователя утеряны.")
+        return
+
+    telegram_id = target_user['telegram_id']
+    username = target_user['username'] or "Пользователь"
+
+    # Обновляем статус в БД
+    async with aiosqlite.connect("users.db") as conn:
+        await conn.execute(
+            "UPDATE users SET is_blocked = 1 WHERE telegram_id = ?", (telegram_id,)
+        )
+        await conn.commit()
+
+    # Обновляем данные в состоянии
+    target_user['is_blocked'] = 1
+    await state.update_data(target_user=target_user)
+
+    # 📢 Уведомление админу
+    await call.message.edit_text(
+        f"🚫 <b>Пользователь</b> <code>{telegram_id}</code> (<i>@{username}</i>) <b>успешно заблокирован.</b>",
+        parse_mode="HTML"
+    )
+
+    # 🔔 Уведомление самому пользователю (опционально)
+    try:
+        await call.message.bot.send_message(
+            telegram_id,
+            "🔒 Вы были заблокированы администратором. Доступ к боту ограничен."
+        )
+    except Exception as e:
+        logger.warning(f"Не удалось уведомить пользователя {telegram_id}: {e}")
+
+    # Через 2 секунды возвращаем в меню действий
+    await asyncio.sleep(2)
+    user_preview = (
+        "👤 <b>Выбран пользователь:</b>\n\n"
+        f"🔹 <b>Telegram ID:</b> <code>{target_user['telegram_id']}</code>\n"
+        f"🔹 <b>Username:</b> @{target_user['username'] or 'не указан'}\n"
+    )
+    await call.message.edit_text(
+        user_preview,
+        reply_markup=get_user_actions_keyboard(target_user),
+        parse_mode="HTML"
+    )
+
+@router.callback_query(lambda call: call.data == "unblock_user")
+async def unblock_user(call: types.CallbackQuery, state: FSMContext):
+    await call.answer()
+
+    data = await state.get_data()
+    target_user = data.get("target_user")
+
+    if not target_user:
+        await call.message.edit_text("❌ Данные пользователя утеряны.")
+        return
+
+    telegram_id = target_user['telegram_id']
+    username = target_user['username'] or "Пользователь"
+
+    # Обновляем статус в БД
+    async with aiosqlite.connect("users.db") as conn:
+        await conn.execute(
+            "UPDATE users SET is_blocked = 0 WHERE telegram_id = ?", (telegram_id,)
+        )
+        await conn.commit()
+
+    # Обновляем данные в состоянии
+    target_user['is_blocked'] = 0
+    await state.update_data(target_user=target_user)
+
+    # 📢 Уведомление админу
+    await call.message.edit_text(
+        f"✅ <b>Пользователь</b> <code>{telegram_id}</code> (<i>@{username}</i>) <b>успешно разблокирован.</b>",
+        parse_mode="HTML"
+    )
+
+    # 🔔 Уведомление пользователю
+    try:
+        await call.message.bot.send_message(
+            telegram_id,
+            "🔓 Вы были разблокированы администратором. Доступ к боту восстановлен."
+        )
+    except Exception as e:
+        logger.warning(f"Не удалось уведомить пользователя {telegram_id}: {e}")
+
+    # Через 2 секунды возвращаем в меню действий
+    await asyncio.sleep(2)
+    user_preview = (
+        "👤 <b>Выбран пользователь:</b>\n\n"
+        f"🔹 <b>Telegram ID:</b> <code>{target_user['telegram_id']}</code>\n"
+        f"🔹 <b>Username:</b> @{target_user['username'] or 'не указан'}\n"
+    )
+    await call.message.edit_text(
+        user_preview,
+        reply_markup=get_user_actions_keyboard(target_user),
+        parse_mode="HTML"
+    )
+
+
+@router.callback_query(lambda call: call.data == "udalit_user")
+async def delete_user_confirm(call: types.CallbackQuery, state: FSMContext):
+    await call.answer()
+
+    data = await state.get_data()
+    target_user = data.get("target_user")
+
+    if not target_user:
+        await call.message.edit_text("❌ Данные пользователя утеряны.")
+        return
+
+    username = target_user['username'] or "Пользователь"
+    telegram_id = target_user['telegram_id']
+
+    # Клавиатура подтверждения
     confirm_kb = InlineKeyboardMarkup(inline_keyboard=[
         [
-            InlineKeyboardButton(text="✅ Да, заблокировать", callback_data="confirm_block_user"),
-            InlineKeyboardButton(text="❌ Нет", callback_data="cancel_admin")
+            InlineKeyboardButton(text=BUTTON_TEXTS["confirm_delete_user_edit_user"], callback_data="confirm_delete_user_edit_user"),
+            InlineKeyboardButton(text=BUTTON_TEXTS["cancel_delete_user_edit_user"], callback_data="cancel_admin")
         ]
     ])
 
     await call.message.edit_text(
-        f"Вы уверены, что хотите заблокировать пользователя:\n"
-        f"<b>{target_user['username']}</b> (ID: {target_user['telegram_id']})?",
+        f"⚠️ <b>Вы уверены, что хотите удалить пользователя?</b>\n\n"
+        f"🔹 <b>ID:</b> <code>{telegram_id}</code>\n"
+        f"🔹 <b>Username:</b> @{username}\n\n"
+        f"❗️ Это действие <b>удалит все данные</b> (email, конфиги, статистику).",
         reply_markup=confirm_kb,
         parse_mode="HTML"
     )
+
+@router.callback_query(lambda call: call.data == "confirm_delete_user_edit_user")
+async def delete_user_execute(call: types.CallbackQuery, state: FSMContext):
     await call.answer()
 
-
-@router.callback_query(lambda call: call.data == "confirm_block_user")
-async def confirm_block_user(call: types.CallbackQuery, state: FSMContext):
     data = await state.get_data()
     target_user = data.get("target_user")
 
-    async with aiosqlite.connect("users.db") as conn:
-        await conn.execute(
-            "UPDATE users SET is_blocked = 1 WHERE telegram_id = ?",
-            (target_user['telegram_id'],)
+    if not target_user:
+        await call.message.edit_text("❌ Данные пользователя утеряны.")
+        return
+
+    telegram_id = target_user['telegram_id']
+    username = target_user['username'] or "Пользователь"
+    user_id_in_db = target_user['id']  # users.id
+
+    deleted_emails = 0
+    deleted_configs = 0
+
+    try:
+        async with aiosqlite.connect("users.db") as conn:
+            cursor = await conn.cursor()
+
+            # 1. Получаем все email пользователя
+            await cursor.execute("SELECT email FROM user_emails WHERE user_id = ?", (user_id_in_db,))
+            emails = [row[0] for row in await cursor.fetchall()]
+
+            # 2. Удаляем конфиги по email
+            if emails:
+                placeholders = ",".join(["?" for _ in emails])
+                await cursor.execute(f"DELETE FROM user_configs WHERE email IN ({placeholders})", emails)
+                deleted_configs = cursor.rowcount
+
+            # 3. Удаляем email
+            await cursor.execute("DELETE FROM user_emails WHERE user_id = ?", (user_id_in_db,))
+            deleted_emails = cursor.rowcount
+
+            # 4. Удаляем пользователя
+            await cursor.execute("DELETE FROM users WHERE telegram_id = ?", (telegram_id,))
+            await conn.commit()
+
+        # 📢 Уведомление админу
+        success_text = (
+            f"🗑 <b>Пользователь успешно удалён:</b>\n\n"
+            f"🔹 <b>ID:</b> <code>{telegram_id}</code>\n"
+            f"🔹 <b>Username:</b> @{username}\n"
+            f"📧 Удалено email: <b>{deleted_emails}</b>\n"
+            f"⚙️ Удалено конфигов: <b>{deleted_configs}</b>"
         )
-        await conn.commit()
+
+        # Кнопка "Назад" в главное меню
+        back_keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="⬅️ В меню", callback_data="back_to_actions")]
+        ])
+
+        await call.message.edit_text(success_text, reply_markup=back_keyboard, parse_mode="HTML")
+
+        # 🔔 Уведомление пользователю (опционально)
+        try:
+            await call.message.bot.send_message(
+                telegram_id,
+                "🗑 Ваш аккаунт был удалён администратором."
+            )
+        except Exception as e:
+            logger.warning(f"Не удалось уведомить пользователя {telegram_id}: {e}")
+
+        # Очищаем состояние
+        await state.set_data({})
+
+    except Exception as e:
+        logger.error(f"Ошибка при удалении пользователя {telegram_id}: {e}")
+        await call.message.edit_text(
+            "❌ Произошла ошибка при удалении пользователя.",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_actions")]
+            ])
+        )
+
+class AdminSendMessage(StatesGroup):
+    waiting_for_message_text = State()
+
+@router.callback_query(lambda call: call.data == "send_message_edit_user")
+async def send_message_to_user_prompt(call: types.CallbackQuery, state: FSMContext):
+    await call.answer()
+
+    data = await state.get_data()
+    target_user = data.get("target_user")
+
+    if not target_user:
+        await call.message.edit_text("❌ Данные пользователя утеряны.")
+        return
 
     await call.message.edit_text(
-        f"✅ Пользователь <code>{target_user['telegram_id']}</code> успешно заблокирован.",
-        parse_mode="HTML"
+        BUTTON_TEXTS["enter_message_edit_user"],
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_actions")],
+            [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_admin")]
+        ])
     )
-    await call.answer()
 
+    await state.set_state(AdminSendMessage.waiting_for_message_text)
 
-@router.callback_query(lambda call: call.data == "udalit_user")
-async def udalit_user(call: types.CallbackQuery):
-    await call.answer()
-    await call.message.edit_text("🗑️ Вы уверены, что хотите удалить пользователя?")
+@router.message(AdminSendMessage.waiting_for_message_text)
+async def send_message_to_user_execute(message: Message, state: FSMContext):
+    admin_message = message.text
+    data = await state.get_data()
+    target_user = data.get("target_user")
+
+    if not target_user:
+        await message.answer("❌ Данные пользователя утеряны.")
+        return
+
+    telegram_id = target_user['telegram_id']
+    username = target_user['username'] or "Пользователь"
+
+    # Пытаемся отправить сообщение
+    try:
+        await message.bot.send_message(
+            chat_id=telegram_id,
+            text=f"📬 Сообщение от администратора:\n\n{admin_message}"
+        )
+        # Успешно отправлено
+        await message.answer(
+            f"✅ {BUTTON_TEXTS['message_sent_edit_user']} <code>{telegram_id}</code> (@{username})",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_actions")]
+            ]),
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        error_msg = str(e)
+        logger.error(f"Не удалось отправить сообщение пользователю {telegram_id}: {error_msg}")
+
+        if "bot is not initialized" in error_msg:
+            admin_reply = "❌ Бот не может отправить сообщение: бот выключен или не инициализирован."
+        elif "bot can't initiate conversation" in error_msg:
+            admin_reply = (
+                "❌ Бот не может начать диалог. Пользователь либо заблокировал бота, "
+                "либо никогда не писал ему после его блокировки."
+            )
+        elif "user is deactivated" in error_msg or "kicked" in error_msg:
+            admin_reply = "❌ Пользователь деактивирован или покинул чат."
+        else:
+            admin_reply = f"❌ Не удалось отправить сообщение: {error_msg}"
+
+        await message.answer(
+            admin_reply,
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_actions")]
+            ])
+        )
+
+    await state.set_state(None)
 
 @router.callback_query(lambda call: call.data == "back_to_actions")
 async def back_to_actions(call: types.CallbackQuery, state: FSMContext):

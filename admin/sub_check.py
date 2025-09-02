@@ -91,7 +91,7 @@ async def check_all_user_subscriptions():
                 await send_subscription_notification(
                     telegram_id,
                     f"Мы скучаем! 🫂\n\nТы пропустил MoyVPN уже 3 дня.\n\nВозьми 3 дня бесплатно — попробуй снова!",
-                    InlineKeyboardButton(text="Получить 3 дня бесплатно", callback_data="free_trial_3days")
+                    InlineKeyboardButton(text="Получить 3 дня бесплатно", callback_data="trial_go")
                 )
                 await update_notified_flag(telegram_id, "notified_after_3_days")
 
@@ -99,8 +99,8 @@ async def check_all_user_subscriptions():
             elif days_left == -7 and not notified_7d:
                 await send_subscription_notification(
                     telegram_id,
-                    f"Финальный шанс! 🔥\n\nТы давно не заходил.\n\nПопробуй ещё 3 дня бесплатно — вдруг снова понравится?",
-                    InlineKeyboardButton(text="Попробовать бесплатно", callback_data="free_trial_3days")
+                    f"📢 MoyVPN ждёт тебя обратно!\nЛогин: {email}\n\n⏳ Уже 3 дня твой интернет без защиты: сайты блокируются, слежка активна, скорость падает.\n\n🔥 Верни свободу и безопасность прямо сейчас — мы дарим тебе 3 дней VPN бесплатно для нового теста подписки.\n\n💳 После теста — всего 90 ₽ / мес, и ты снова с щитом от MoyVPN.",
+                    InlineKeyboardButton(text="Попробовать бесплатно", callback_data="trial_7")
                 )
                 await update_notified_flag(telegram_id, "notified_after_7_days")
 
@@ -244,7 +244,7 @@ async def check_client_subscription(client, current_date):
         await send_subscription_notification(
             telegram_id,
             f"Мы скучаем! 🫂\n\nТы пропустил MoyVPN уже 3 дня.\n\nВозьми 3 дня бесплатно — попробуй снова!",
-            InlineKeyboardButton(text="Получить 3 дня бесплатно", callback_data="free_trial_3days")
+            InlineKeyboardButton(text="Получить 3 дня бесплатно", callback_data="trial_go")
         )
         await conn.execute("UPDATE users SET notified_after_3_days = 1 WHERE telegram_id = ?", (telegram_id,))
         await conn.commit()
@@ -254,7 +254,7 @@ async def check_client_subscription(client, current_date):
         await send_subscription_notification(
             telegram_id,
             f"Финальный шанс! 🔥\n\nТы давно не заходил.\n\nПопробуй ещё 3 дня бесплатно — вдруг снова понравится?",
-            InlineKeyboardButton(text="Попробовать бесплатно", callback_data="free_trial_3days")
+            InlineKeyboardButton(text="Попробовать бесплатно", callback_data="trial_go")
         )
         await conn.execute("UPDATE users SET notified_after_7_days = 1 WHERE telegram_id = ?", (telegram_id,))
         await conn.commit()
