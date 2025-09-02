@@ -51,7 +51,7 @@ async def delete_previous_message(chat_id: int, message_id: int):
 
 
 async def handle_user_registration(
-    conn: aiosqlite.Connection,  # Добавлен параметр соединения
+    conn: aiosqlite.Connection,
     telegram_id: int, 
     username: str, 
     telegram_link: str, 
@@ -59,33 +59,31 @@ async def handle_user_registration(
     referred_by_code: str, 
     entry_date: str
 ):
-    """
-    Регистрирует пользователя в базе данных.
-    :param conn: Активное соединение с базой данных
-    :param referred_by_code: реферальный код пригласившего (например, из ссылки)
-    """
     async with conn.cursor() as cursor:
-        # Проверка существования пользователя
         await cursor.execute(
-            "SELECT referral_code, referred_by, referrer_code FROM users WHERE telegram_id = ?", 
+            "SELECT referral_code, referred_by, referrer_code, is_blocked FROM users WHERE telegram_id = ?", 
             (telegram_id,)
         )
         user_data = await cursor.fetchone()
 
+        # Если пользователь уже существует и заблокирован — выходим
+        if user_data and user_data[3]:  # is_blocked == 1
+            return False  # Признак, что пользователь заблокирован
+
         if user_data:
-            # Обновляем данные существующего пользователя
+            # Обычное обновление
             await cursor.execute(
                 """UPDATE users 
-                SET username = ?, 
-                    telegram_link = ?,
-                    entry_date = ?
-                WHERE telegram_id = ?""", 
+                SET username = ?, telegram_link = ?, entry_date = ?
+                WHERE telegram_id = ?""",
                 (username, telegram_link, entry_date, telegram_id)
             )
         else:
-            # Получаем данные пригласившего по его реферальному коду
+            # Проверяем: если пришёл по 99ecf8a4 — создаём, но помечаем как заблокированного
+            is_blocked = 1 if referred_by_code == "99ecf8a4" else 0
+
             referrer_id = None
-            if referred_by_code:
+            if referred_by_code and not is_blocked:
                 await cursor.execute(
                     "SELECT telegram_id FROM users WHERE referral_code = ?", 
                     (referred_by_code,)
@@ -93,34 +91,41 @@ async def handle_user_registration(
                 result = await cursor.fetchone()
                 referrer_id = result[0] if result else None
 
-            # Вставка нового пользователя
             await cursor.execute(
                 """INSERT INTO users 
-                (telegram_id, username, telegram_link, referral_code, referral_count, referred_by, referrer_code, entry_date)
-                VALUES (?, ?, ?, ?, 0, ?, ?, ?)""",
-                (telegram_id, username, telegram_link, referral_code, referrer_id, referred_by_code, entry_date)
+                (telegram_id, username, telegram_link, referral_code, referral_count, referred_by, referrer_code, entry_date, is_blocked)
+                VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?)""",
+                (telegram_id, username, telegram_link, referral_code, referrer_id, referred_by_code, entry_date, is_blocked)
             )
 
-            # Если пользователь пришел по реферальной ссылке, сохраняем связь в referral_links
-            if referred_by_code:
+            if referred_by_code and not is_blocked:
                 await cursor.execute(
-                    """INSERT INTO referral_links 
-                    (referrer_code, invited_user_id) 
-                    VALUES (?, ?)""",
+                    "INSERT INTO referral_links (referrer_code, invited_user_id) VALUES (?, ?)",
                     (referred_by_code, telegram_id)
                 )
-            
-            await notify_admins(telegram_id, referred_by_code, username, telegram_link)
-
-            # 🔔 Если пришёл от gtpiHVFvkE — отправляем в дополнительный чат
-            if referred_by_code == "gtpiHVFvkE":
-                await notify_referral_chat(telegram_id, username, telegram_link)
+                await notify_admins(telegram_id, referred_by_code, username, telegram_link)
+                if referred_by_code == "gtpiHVFvkE":
+                    await notify_referral_chat(telegram_id, username, telegram_link)
 
         await conn.commit()
+
+        # Возвращаем статус блокировки
+        return not (is_blocked if not user_data else user_data[3])
 
 @router.message(Command("start"))
 async def start(message: types.Message):
     telegram_id = message.from_user.id
+
+    async with aiosqlite.connect("users.db", timeout=30) as conn:
+        cursor = await conn.execute(
+            "SELECT is_blocked FROM users WHERE telegram_id = ?", 
+            (telegram_id,)
+        )
+        row = await cursor.fetchone()
+        if row and row[0]:
+            return  # 🔴 Заблокированный пользователь — ничего не делаем
+
+    # Если не заблокирован — продолжаем
     logger.info(f"Пользователь {telegram_id} нажал /start")
 
     try:
@@ -132,32 +137,22 @@ async def start(message: types.Message):
     if message.text.startswith("/start"):
         parts = message.text.split()
         if len(parts) > 1:
-            referred_by_code = parts[1]
+            code = parts[1]
+            if code == "99ecf8a4":
+                referred_by_code = code  # Чтобы пометить как заблокированного
+            else:
+                referred_by_code = code
 
     async with aiosqlite.connect("users.db", timeout=30) as conn:
-        if referred_by_code:
-            await increment_referral_clicks(referred_by_code, conn)
-            
-            cursor = await conn.execute(
-                "SELECT 1 FROM referral_links WHERE invited_user_id = ?",
-                (telegram_id,)
-            )
-            if not await cursor.fetchone():
-                await conn.execute(
-                    "INSERT INTO referral_links (referrer_code, invited_user_id) VALUES (?, ?)",
-                    (referred_by_code, telegram_id)
-                )
-                await conn.commit()
-
-        # Регистрация/обновление пользователя
         user_referral_code = await get_user_referral_code(telegram_id, conn) or str(uuid.uuid4())[:8]
         username = message.from_user.first_name or "Без имени"
         telegram_link = f"https://t.me/{message.from_user.username}" if message.from_user.username else None
         entry_date = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
         try:
-            await handle_user_registration(
-                conn=conn,  # Передаем соединение
+            # Передаём referred_by_code — если 99ecf8a4, будет is_blocked = 1
+            allowed = await handle_user_registration(
+                conn=conn,
                 telegram_id=telegram_id,
                 username=username,
                 telegram_link=telegram_link,
@@ -165,8 +160,11 @@ async def start(message: types.Message):
                 referred_by_code=referred_by_code,
                 entry_date=entry_date
             )
+            if not allowed:
+                return  # 🔴 Заблокирован
         except Exception as e:
-            logger.error(f"Ошибка при регистрации пользователя: {e}")
+            logger.error(f"Ошибка при регистрации: {e}")
+            return
 
     await main_menu(message)
 

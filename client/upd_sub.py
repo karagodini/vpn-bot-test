@@ -158,10 +158,15 @@ async def handle_get_config2(callback_query: types.CallbackQuery, state: FSMCont
 async def process_instruction_callback_ios(callback_query: types.CallbackQuery, state: FSMContext):
 
     instruction_text = (
-        "1️⃣ Скачайте приложение <b><a href='https://apps.apple.com/app/id6476628951'>v2RayTun</a></b> из Appstore\n\n"
-        "2️⃣ Скопируйте ссылку, нажав на нее\n\n"
-        "3️⃣ Перейдите в приложение <b>v2RayTun</b>, нажмите на плюсик в правом верхнем углу "
-        "-> \"Добавить из буфера\" и активируйте VPN"
+        "1️⃣ Скачайте приложение на выбор, но советуем на всякий случай скачать все из App Store на случай блокировки приложения.\n\n"
+        "<b><a href='https://apps.apple.com/ru/app/v2raytun/id6476628951'>v2RayTun</a></b>:\n"
+        "(<a href='https://apps.apple.com/ru/app/v2raytun/id6476628951'>https://apps.apple.com/ru/app/v2raytun/id6476628951</a>)\n\n"
+        "<b><a href='https://apps.apple.com/us/app/happ-proxy-utility/id6504287215'>Happ</a></b>:\n"
+        "(<a href='https://apps.apple.com/us/app/happ-proxy-utility/id6504287215'>https://apps.apple.com/us/app/happ-proxy-utility/id6504287215</a>)\n\n"
+        "<b><a href='https://apps.apple.com/us/app/streisand/id6450534064?platform=iphone'>Streisand</a></b>:\n"
+        "(<a href='https://apps.apple.com/us/app/streisand/id6450534064?platform=iphone'>https://apps.apple.com/us/app/streisand/id6450534064?platform=iphone</a>)\n\n"
+        "2️⃣ Скопируйте ссылку, нажав на нее ⤴️\n\n"
+        "3️⃣ Перейдите в скачанное <b>Вами</b> приложение и активируйте ключ, который скопировали в нашем боте."
     )
 
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
@@ -183,9 +188,9 @@ async def process_instruction_callback_ios(callback_query: types.CallbackQuery, 
 async def process_instruction_callback_android(callback_query: types.CallbackQuery, state: FSMContext):
 
     instruction_text = (
-        "1️⃣ Скачайте приложение <b><a href='https://play.google.com/store/apps/details?id=com.v2raytun.android&pli=1'>v2Box</a></b> из Google Play\n\n"
+        "1️⃣ Скачайте приложение <b><a href='https://play.google.com/store/search?q=happ&c=apps&hl=ru'>Happ</a></b> из Google Play\n\n"
         "2️⃣ Скопируйте ссылку, нажав на нее\n\n"
-        "3️⃣ Перейдите в приложение <b>v2Box</b>, нажмите на плюсик в правом верхнем углу "
+        "3️⃣ Перейдите в приложение <b>Happ</b>, нажмите на плюсик в правом верхнем углу "
         "-> \"Добавить из буфера\" и активируйте VPN"
     )
 
@@ -233,14 +238,13 @@ async def process_instruction_callback_macos(callback_query: types.CallbackQuery
 async def process_instruction_callback_windows(callback_query: types.CallbackQuery, state: FSMContext):
 
     instruction_text = (
-        "1️⃣ Скачайте приложение <b><a href='https://hiddify.com/'>Hiddify</a></b>\n\n"
-        "2️⃣ Скопируйте ссылку, нажав на нее\n\n"
-        "3️⃣ Перейдите в приложение <b>Hiddify</b>, нажмите на плюсик в правом верхнем углу "
-        "-> \"Добавить из буфера\" и активируйте VPN"
+        "1️⃣ Скачайте приложение <b><a href='https://v2raytun.com/'>V2Ray</a></b>\n\n"
+        "2️⃣ Обязательно прочитайте <b>инструкцию по установке</b> по кнопке ниже!\n\n"
+        "3️⃣ Перейдите в установленное приложение <b><a href='https://v2raytun.com/'>V2Ray</a></b> на Вашем ПК."
     )
 
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📖 Пошаговая инструкция", url="https://telegra.ph/Instrukciya-po-ustanovke-Hiddify-ot-MoyVPN-08-19")],
+        [InlineKeyboardButton(text="📖 Пошаговая инструкция", url="https://telegra.ph/Nastrojka-V2Ray-na-Windows-MoyVPN-09-02")],
         [InlineKeyboardButton(text="⬅ Назад", callback_data="main_menu")]
     ])
 

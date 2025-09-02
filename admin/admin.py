@@ -124,7 +124,8 @@ async def admin_panel(message: types.Message):
         types.KeyboardButton(text=BUTTON_TEXTS["referrals"])
     )
     keyboard.row(
-        types.KeyboardButton(text=BUTTON_TEXTS["days_sub"])
+        types.KeyboardButton(text=BUTTON_TEXTS["days_sub"]),
+        types.KeyboardButton(text=BUTTON_TEXTS["edit_users"])
     )
     keyboard.row(
         types.KeyboardButton(text=BUTTON_TEXTS["backup"]),
@@ -1168,3 +1169,209 @@ async def update_all_days_left_on_startup(message: types.Message):
         f"🌐 На {len(server_ids)} серверах.",
         parse_mode=ParseMode.HTML
     )
+
+"""Блок редактирования пользователя"""
+class AdminUserSearch(StatesGroup):
+    waiting_for_user_identifier = State()
+
+@router.message(F.text == BUTTON_TEXTS["edit_users"])
+async def edit_users_handler(message: Message, state: FSMContext):
+    """Запрашивает идентификатор пользователя (ID или ссылку)"""
+    await message.delete()
+
+    if message.from_user.id not in ADMIN_IDS:
+        await message.answer("❌ У вас нет прав для доступа к этому разделу.")
+        return
+
+    sent_message = await message.answer(
+        "🆔 Введите <b>Telegram ID</b> или <b>@username</b> пользователя, с которым хотите работать:"
+    )
+
+    await state.update_data(sent_message_id=sent_message.message_id, chat_id=sent_message.chat.id)
+    await state.set_state(AdminUserSearch.waiting_for_user_identifier)
+
+@router.message(AdminUserSearch.waiting_for_user_identifier)
+async def process_user_identifier(message: Message, state: FSMContext):
+    identifier = message.text.strip().lower()
+
+    if not identifier:
+        await message.answer("❌ Введите корректный идентификатор.")
+        return
+
+    # Извлекаем username
+    if identifier.startswith("@"):
+        search_username = identifier[1:]
+    elif "t.me/" in identifier:
+        search_username = identifier.split("t.me/")[-1].split("?")[0]
+    else:
+        search_username = identifier.strip()
+
+    if not search_username:
+        await message.answer("❌ Не удалось извлечь имя пользователя.")
+        return
+
+    pattern = f"%t.me/{search_username}%"
+
+    async with aiosqlite.connect("users.db") as conn:
+        cursor = await conn.cursor()
+        await cursor.execute("SELECT * FROM users WHERE LOWER(telegram_link) LIKE ?", (pattern,))
+        row = await cursor.fetchone()
+
+        if row:
+            columns = [desc[0] for desc in cursor.description]
+            user_data = dict(zip(columns, row))
+        else:
+            user_data = None
+
+    if not user_data:
+        await message.answer(f"❌ Пользователь с ссылкой <code>t.me/{search_username}</code> не найден.", parse_mode="HTML")
+        return
+
+    # Сохраняем пользователя
+    await state.update_data(target_user=user_data)
+
+    # Краткое сообщение: только Telegram ID и Username
+    user_preview = (
+        "👤 <b>Выбран пользователь:</b>\n\n"
+        f"🔹 <b>Telegram ID:</b> <code>{user_data['telegram_id']}</code>\n"
+        f"🔹 <b>Username:</b> @{user_data['username'] or 'не указан'}\n"
+    )
+
+    # Кнопки действий
+    user_actions_keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=BUTTON_TEXTS["info_for_admin"], callback_data="user_info_for_admin")],
+        [InlineKeyboardButton(text=BUTTON_TEXTS["prodlit_podpisku"], callback_data="prodlit_podpisku")],
+        [InlineKeyboardButton(text=BUTTON_TEXTS["statistics_for_admin"], callback_data="user_stats_for_admin")],
+        [InlineKeyboardButton(text=BUTTON_TEXTS["block_user"], callback_data="block_user")],
+        [InlineKeyboardButton(text=BUTTON_TEXTS["udalit_user"], callback_data="udalit_user")],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_admin")]
+    ])
+
+    await message.answer(user_preview, reply_markup=user_actions_keyboard, parse_mode="HTML")
+    await state.set_state(None)
+
+@router.callback_query(lambda call: call.data == "user_info_for_admin")
+async def user_info_callback_for_admin(call: types.CallbackQuery, state: FSMContext):
+    await call.answer()
+
+    data = await state.get_data()
+    user_data = data.get("target_user")
+
+    if not user_data:
+        await call.message.edit_text("❌ Данные пользователя утеряны. Начните сначала.")
+        return
+
+    full_info_text = (
+        "📘 <b>Подробная информация о пользователе</b>\n\n"
+        f"🔹 <b>ID в БД:</b> {user_data['id']}\n"
+        f"🔹 <b>Telegram ID:</b> <code>{user_data['telegram_id']}</code>\n"
+        f"🔹 <b>Username:</b> @{user_data['username'] or 'не указан'}\n"
+        f"🔹 <b>Ссылка:</b> {user_data['telegram_link'] or 'не указана'}\n"
+        f"🔹 <b>Реф. код:</b> <code>{user_data['referral_code']}</code>\n"
+        f"🔹 <b>Получал пробную:</b> {'Да' if user_data['has_trial'] else 'Нет'}\n"
+        f"🔹 <b>Доход (sum_my):</b> {user_data['sum_my']:.2f} руб.\n"
+        f"🔹 <b>Пригласил (referrer_code):</b> {user_data['referrer_code'] or '—'}\n"
+        f"🔹 <b>Заблокирован:</b> {'Да' if user_data['is_blocked'] else 'Нет'}\n"
+    )
+
+    # Кнопка "Назад" ведёт в главное меню действий
+    back_keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_actions")],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_admin")]
+    ])
+
+    await call.message.edit_text(full_info_text, reply_markup=back_keyboard, parse_mode="HTML")
+
+
+@router.callback_query(lambda call: call.data == "prodlit_podpisku")
+async def prodlit_podpisku(call: types.CallbackQuery):
+    await call.answer()
+    await call.message.edit_text("💳 Здесь можно продлить подписку.")
+
+
+@router.callback_query(lambda call: call.data == "user_stats_for_admin")
+async def user_stats_callback_for_admin(call: types.CallbackQuery):
+    await call.answer()
+    await call.message.edit_text("📊 Введите id пользователя для которого хотите посмотреть статистику.")
+
+
+@router.callback_query(lambda call: call.data == "block_user")
+async def block_user(call: types.CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    target_user = data.get("target_user")
+
+    if not target_user:
+        await call.answer("❌ Пользователь не выбран.", show_alert=True)
+        return
+
+    if target_user['is_blocked']:
+        await call.message.edit_text("⚠️ Пользователь уже заблокирован.")
+        return
+
+    confirm_kb = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="✅ Да, заблокировать", callback_data="confirm_block_user"),
+            InlineKeyboardButton(text="❌ Нет", callback_data="cancel_admin")
+        ]
+    ])
+
+    await call.message.edit_text(
+        f"Вы уверены, что хотите заблокировать пользователя:\n"
+        f"<b>{target_user['username']}</b> (ID: {target_user['telegram_id']})?",
+        reply_markup=confirm_kb,
+        parse_mode="HTML"
+    )
+    await call.answer()
+
+
+@router.callback_query(lambda call: call.data == "confirm_block_user")
+async def confirm_block_user(call: types.CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    target_user = data.get("target_user")
+
+    async with aiosqlite.connect("users.db") as conn:
+        await conn.execute(
+            "UPDATE users SET is_blocked = 1 WHERE telegram_id = ?",
+            (target_user['telegram_id'],)
+        )
+        await conn.commit()
+
+    await call.message.edit_text(
+        f"✅ Пользователь <code>{target_user['telegram_id']}</code> успешно заблокирован.",
+        parse_mode="HTML"
+    )
+    await call.answer()
+
+
+@router.callback_query(lambda call: call.data == "udalit_user")
+async def udalit_user(call: types.CallbackQuery):
+    await call.answer()
+    await call.message.edit_text("🗑️ Вы уверены, что хотите удалить пользователя?")
+
+@router.callback_query(lambda call: call.data == "back_to_actions")
+async def back_to_actions(call: types.CallbackQuery, state: FSMContext):
+    await call.answer()
+
+    data = await state.get_data()
+    user_data = data.get("target_user")
+
+    if not user_data:
+        await call.message.edit_text("❌ Пользователь не найден. Начните сначала.")
+        return
+
+    user_preview = (
+        "👤 <b>Выбран пользователь:</b>\n\n"
+        f"🔹 <b>Telegram ID:</b> <code>{user_data['telegram_id']}</code>\n"
+        f"🔹 <b>Username:</b> @{user_data['username'] or 'не указан'}\n"
+    )
+
+    user_actions_keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=BUTTON_TEXTS["info_for_admin"], callback_data="user_info_for_admin")],
+        [InlineKeyboardButton(text=BUTTON_TEXTS["prodlit_podpisku"], callback_data="prodlit_podpisku")],
+        [InlineKeyboardButton(text=BUTTON_TEXTS["statistics_for_admin"], callback_data="user_stats_for_admin")],
+        [InlineKeyboardButton(text=BUTTON_TEXTS["block_user"], callback_data="block_user")],
+        [InlineKeyboardButton(text=BUTTON_TEXTS["udalit_user"], callback_data="udalit_user")],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_admin")]
+    ])
+
+    await call.message.edit_text(user_preview, reply_markup=user_actions_keyboard, parse_mode="HTML")
