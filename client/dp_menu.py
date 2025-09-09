@@ -176,9 +176,12 @@ async def handle_main_menu(callback_query: types.CallbackQuery):
     user = callback_query.from_user
     name = user.first_name or "друг"
 
+    
+
     text = (
         f"Привет, {name}!\n\n"
-        "Готов пользоваться VPN без лишних заморочек?\n\n"
+        f"Готов пользоваться VPN без лишних заморочек?\n\n"
+        f"{subscription_status}\n\n"
     )
 
     await callback_query.message.edit_text(
@@ -493,3 +496,55 @@ async def trial_windows(callback_query: types.CallbackQuery):
     )
 
 """end меню для пробной подписки"""
+
+
+async def get_days_left_by_telegram_id(telegram_id: int) -> int | None:
+    """
+    Возвращает days_left для пользователя по telegram_id.
+    Использует связку: users → user_emails → user_configs.
+    """
+    try:
+        async with aiosqlite.connect("users.db") as conn:
+            # Получаем email через users → user_emails
+            async with conn.execute("""
+                SELECT ue.email
+                FROM users u
+                JOIN user_emails ue ON u.id = ue.user_id
+                WHERE u.telegram_id = ?
+                LIMIT 1
+            """, (telegram_id,)) as cursor:
+                row = await cursor.fetchone()
+                if not row:
+                    return None
+                email = row[0]
+
+            # Получаем days_left из user_configs
+            async with conn.execute("""
+                SELECT days_left
+                FROM user_configs
+                WHERE email = ?
+                LIMIT 1
+            """, (email,)) as cursor:
+                row = await cursor.fetchone()
+                if row and row[0] is not None:
+                    return int(row[0])
+                return None
+
+    except Exception as e:
+        logger.error(f"Ошибка получения days_left для telegram_id={telegram_id}: {e}")
+        return None
+
+def format_subscription_status(days_left: int | None) -> str:
+    """
+    Форматирует статус подписки для отображения в меню.
+    """
+    if days_left is None:
+        return "❌ Конфиг не найден"
+    elif days_left > 3:
+        return f"📅 Подписка активна: <b>{days_left}</b> дн."
+    elif days_left > 0:
+        return f"🟡 Заканчивается через: <b>{days_left}</b> дн."
+    elif days_left == 0:
+        return "🔴 <b>Сегодня последний день!</b>"
+    else:
+        return "❌ <b>Подписка закончилась</b>"

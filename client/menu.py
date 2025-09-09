@@ -105,10 +105,6 @@ def get_main_menu(callback_query: types.CallbackQuery):
         )
     else:
         builder.row(
-            InlineKeyboardButton(
-                text=BUTTON_TEXTS["buy_vpn"], 
-                callback_data="buy_vpn"
-            )
         )
 
     # Остальные кнопки
@@ -116,12 +112,6 @@ def get_main_menu(callback_query: types.CallbackQuery):
         InlineKeyboardButton(
             text=BUTTON_TEXTS["sub"], 
             url="https://t.me/vpnmoy/"
-        )
-    )
-    builder.row(
-        InlineKeyboardButton(
-            text=BUTTON_TEXTS["trial_seven"], 
-            callback_data="trial_seven"
         )
     )
     builder.row(

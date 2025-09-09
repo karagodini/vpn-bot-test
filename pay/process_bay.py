@@ -114,81 +114,102 @@ async def handle_invalid_message(message: types.Message, state: FSMContext):
 @router.callback_query(lambda query: query.data == "trial_1")
 async def process_trial_subscription(callback_query: types.CallbackQuery, state: FSMContext):
     """
-    Обрабатывает пробную подписку, обновляет состояние, выбирает сервер и добавляет клиента.
+    Обрабатывает пробную подписку: показывает статус, выбирает сервер, создаёт конфиг.
     """
     telegram_id = callback_query.from_user.id
     logger.info(f"Пользователь {telegram_id} начал процесс получения пробной подписки.")
 
-    # Проверка активной подписки
+    # Показываем пользователю, что идёт загрузка
+    try:
+        await callback_query.message.edit_text(
+            "⏳ <b>Создаём вашу пробную подписку...</b>\nПодключаем сервер, генерируем ключ — подождите пару секунд.",
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        logger.warning(f"Не удалось отредактировать сообщение: {e}")
+        # Если не получилось — отправим новое
+        await callback_query.message.answer(
+            "⏳ <b>Создаём вашу пробную подписку...</b>",
+            parse_mode="HTML"
+        )
+
+    # Снимаем "часики" с кнопки
+    await callback_query.answer()
+
+    # Проверка: есть ли уже активная подписка
     if not has_active_subscription(telegram_id):
-        logger.info(f"Пользователь {telegram_id} не имеет активной подписки. Продолжаем обработку пробной версии.")
-        
+        logger.info(f"Пользователь {telegram_id} не имеет активной подписки. Продолжаем.")
+
         try:
-            # Этап 1: Рассчитываем срок действия подписки
+            # Этап 1: Рассчитываем срок действия (7 дней)
             current_time = datetime.utcnow()
             expiry_timestamp = current_time + timedelta(days=TRIAL)
             expiry_time = int(expiry_timestamp.timestamp() * 1000)
-            logger.debug(f"Рассчитано время окончания подписки: {expiry_timestamp} (timestamp: {expiry_time})")
+            logger.debug(f"Время окончания: {expiry_timestamp} (timestamp: {expiry_time})")
 
             # Этап 2: Генерация логина
             name = generate_login(telegram_id)
-            logger.info(f"Сгенерирован логин для пользователя {telegram_id}: {name}")
+            logger.info(f"Сгенерирован логин: {name}")
 
-            # Этап 3: Обновление состояния FSM
+            # Этап 3: Обновляем FSM
             await state.update_data(expiry_time=expiry_time)
-            logger.debug(f"Состояние FSM обновлено: expiry_time={expiry_time}")
+            logger.debug("Состояние FSM: expiry_time обновлён")
 
-            # Этап 4: Обновление статуса пробной подписки в БД
+            # Этап 4: Обновляем статус пробной подписки в БД
             await update_user_trial_status(telegram_id)
-            logger.info(f"Статус пробной подписки обновлён для пользователя {telegram_id}")
+            logger.info(f"Статус пробной подписки обновлён для {telegram_id}")
 
             # Этап 5: Выбор сервера
-            server_selection = "random"
-            selected_server = await get_optimal_server(server_selection, server_db)
+            selected_server = await get_optimal_server("random", server_db)
             logger.info(f"Выбранный сервер: {selected_server}")
-            
             if not selected_server:
-                logger.error(f"Не удалось выбрать сервер для пользователя {telegram_id}")
-                await bot.send_message(callback_query.from_user.id, "❌ Не удалось выбрать сервер. Попробуйте позже.")
-                await callback_query.answer()
+                logger.error(f"Не удалось выбрать сервер для {telegram_id}")
+                await callback_query.message.edit_text(
+                    "❌ Не удалось выбрать сервер. Попробуйте позже.",
+                    parse_mode="HTML"
+                )
                 return
 
-            # Этап 6: Получение данных сервера
+            # Этап 6: Получаем данные сервера
             server_data = await get_server_data(selected_server)
             logger.info(f"Получены данные сервера: {selected_server}")
             if not server_data:
                 logger.error(f"Данные сервера {selected_server} не найдены.")
-                await bot.send_message(callback_query.from_user.id, "❌ Не удалось получить данные сервера.")
-                await callback_query.answer()
+                await callback_query.message.edit_text(
+                    "❌ Не удалось получить данные сервера.",
+                    parse_mode="HTML"
+                )
                 return
 
             country_name = server_data.get('name', "🎲 Рандомная страна")
-            logger.info(f"Определено имя страны для конфига: {country_name}")
+            logger.info(f"Имя страны: {country_name}")
 
-            # Этап 7: Авторизация на сервере
-            logger.info(f"Начало авторизации на сервере {server_data['login_url']}")
+            # Этап 7: Авторизация
+            logger.info(f"Авторизация на сервере {server_data['login_url']}")
             session_id = await login(server_data['login_url'], {
                 "username": server_data['username'],
                 "password": server_data['password']
             })
             if not session_id:
                 logger.error(f"Авторизация не удалась на сервере {server_data['login_url']}")
-                await bot.send_message(callback_query.from_user.id, "❌ Не удалось авторизоваться на сервере.")
-                await callback_query.answer()
+                await callback_query.message.edit_text(
+                    "❌ Не удалось авторизоваться на сервере.",
+                    parse_mode="HTML"
+                )
                 return
-            logger.info(f"Авторизация успешна на сервере {selected_server}")
+            logger.info("Авторизация успешна")
 
             # Этап 8: Добавление клиента
             inbound_ids = server_data['inbound_ids']
-            logger.info(f"Добавление клиента {name} на сервер {selected_server} с inbound_ids: {inbound_ids}")
+            logger.info(f"Добавляем клиента {name} на сервер {selected_server}")
             await add_client(
                 name, expiry_time, inbound_ids, telegram_id,
                 server_data['add_client_url'], server_data['login_url'],
                 {"username": server_data['username'], "password": server_data['password']}
             )
-            logger.info(f"Клиент {name} успешно добавлен на сервер {selected_server}")
+            logger.info(f"Клиент {name} добавлен")
 
-            # Этап 9: Сохранение данных в FSM
+            # Этап 9: Сохранение в FSM
             await state.update_data(
                 email=name,
                 client_id=telegram_id,
@@ -201,40 +222,42 @@ async def process_trial_subscription(callback_query: types.CallbackQuery, state:
                 sub_url=server_data['sub_url'],
                 json_sub=server_data['json_sub']
             )
-            logger.debug("Данные пользователя сохранены в FSM.")
+            logger.debug("Данные сохранены в FSM")
 
-            # Этап 10: Генерация конфигурации
-            logger.info(f"Генерация конфигурации для пользователя {telegram_id}")
+            # Этап 10: Генерация конфига
+            logger.info("Генерация конфигурации...")
             userdata, config, config2, config3 = await generate_config_from_pay(telegram_id, name, state)
-            logger.info(f"Конфигурация успешно сгенерирована для {name}")
 
             # Этап 11: Отправка конфига
-            logger.info(f"Отправка конфигурации пользователю {telegram_id}")
+            logger.info("Отправка конфигурации пользователю")
             await send_config_from_state(callback_query.message, state, telegram_id=callback_query.from_user.id, edit=True)
 
             # Этап 12: Очистка состояния
             await state.clear()
-            logger.debug("Состояние FSM очищено.")
+            logger.debug("Состояние FSM очищено")
 
-            # Этап 13: Сохранение пользователя в БД
+            # Этап 13: Сохранение в БД
             user_id = await insert_or_update_user(telegram_id, name, selected_server)
-            logger.info(f"Пользователь {telegram_id} сохранён в базе данных с user_id={user_id}")
+            logger.info(f"Пользователь сохранён в БД: user_id={user_id}")
 
-            logger.info(f"Пробная подписка успешно оформлена для пользователя {telegram_id}")
+            logger.info(f"Пробная подписка успешно оформлена для {telegram_id}")
 
         except Exception as e:
-            logger.exception(f"Ошибка при оформлении пробной подписки для пользователя {telegram_id}: {e}")
-            await bot.send_message(callback_query.from_user.id, "❌ Произошла ошибка. Попробуйте снова.")
+            logger.exception(f"Ошибка при оформлении пробной подписки: {e}")
+            await callback_query.message.edit_text(
+                "❌ Произошла ошибка при создании подписки. Попробуйте позже.",
+                parse_mode="HTML"
+            )
 
     else:
-        logger.warning(f"Пользователь {telegram_id} попытался получить пробную подписку, но уже имеет активную.")
+        logger.warning(f"Пользователь {telegram_id} уже имеет активную подписку.")
         await callback_query.message.edit_text(
-            "⚠ У вас уже есть активная подписка. Оформить пробную подписку можно только один раз.",
-            reply_markup=get_main_menu(callback_query)
+            "⚠ У вас уже есть активная подписка. Пробная доступна только один раз.",
+            reply_markup=get_main_menu(callback_query),
+            parse_mode="HTML"
         )
 
-    await callback_query.answer()
-    logger.info(f"Обработка callback_query для пользователя {telegram_id} завершена.")
+    logger.info(f"Обработка завершена для пользователя {telegram_id}")
 
 
 @router.callback_query(lambda query: query.data == "trial_go")

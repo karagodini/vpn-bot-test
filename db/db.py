@@ -177,6 +177,36 @@ class Database:
         self.cursor.close()
         self.connection.close()
 
+    def has_used_trial_seven(self, telegram_id: int) -> bool:
+        """
+        Проверяет, использовал ли пользователь пробный период (7 дней).
+        """
+        query = "SELECT used_trial_seven FROM users WHERE telegram_id = ?"
+        self.cursor.execute(query, (telegram_id,))
+        result = self.cursor.fetchone()
+        return bool(result[0]) if result else False
+
+    def mark_trial_seven_used(self, telegram_id: int):
+        """
+        Отмечает, что пользователь использовал пробный период (7 дней).
+        """
+        query = "UPDATE users SET used_trial_seven = 1 WHERE telegram_id = ?"
+        self.cursor.execute(query, (telegram_id,))
+        self.connection.commit()
+
+    async def get_server_ids_by_email(self, email: str) -> list[int]:
+        """
+        Возвращает список server_id для указанного email.
+        """
+        query = "SELECT id_server FROM user_emails WHERE email = ?"
+        try:
+            self.cursor.execute(query, (email,))
+            rows = self.cursor.fetchall()
+            return [row[0] for row in rows]
+        except Exception as e:
+            logger.error(f"❌ Ошибка при получении server_id для email={email}: {e}")
+            return []
+
 async def get_email_from_usersdatabase(client_id):
     conn = sqlite3.connect(USERSDATABASE)
     cursor = conn.cursor()
@@ -676,3 +706,4 @@ async def clean_referal_table():
                 """, (telegram_user,))
         
         await db.commit()
+
